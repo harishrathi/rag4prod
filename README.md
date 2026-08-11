@@ -41,7 +41,7 @@ recomputing — or re-paying for — earlier stages.
 | 3 | Rendering + YOLO layout detection | ✅ |
 | 4 | OCR for scanned pages (bundled Tesseract) | ✅ |
 | 5 | Tiered table extraction + multi-page stitching | ✅ |
-| 6 | Assembly, dedup, chunking | ⬜ |
+| 6 | Assembly, dedup, chunking | ✅ |
 
 ## Setup
 

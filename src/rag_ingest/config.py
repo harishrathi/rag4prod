@@ -175,3 +175,23 @@ TABLE_CONT_TOP_FRAC = 0.12
 # tier-2 cells carry OCR noise). Above this ratio -> treated as a
 # repeated header and dropped from the continuation fragment.
 HEADER_MATCH_RATIO = 0.8
+
+# ---------------------------------------------------------------------------
+# STAGE 7 — Assembly + chunking (rag_ingest/assemble.py, chunking.py)
+# ---------------------------------------------------------------------------
+
+# Target chunk size in characters. ~4 chars/token for English prose, so
+# 2000 chars ≈ the classic 512-token chunk. The chunker splits on
+# paragraph boundaries first, sentences second — never mid-sentence.
+CHUNK_MAX_CHARS = 2000
+
+# A merged multi-page table can exceed any chunk size. It stays
+# LOGICALLY atomic but is emitted as row groups of this many data rows,
+# each group repeating the header row, all sharing a table_id — so a
+# retrieval hit lands on rows WITH their column meanings intact, and a
+# consumer can reassemble the full table by table_id.
+TABLE_ROWS_PER_CHUNK = 20
+
+# Heading depth is capped: anything deeper flattens to this level.
+# Markdown only renders 6; retrieval gains nothing below that.
+MAX_HEADING_LEVEL = 6

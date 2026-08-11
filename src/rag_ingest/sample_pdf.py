@@ -93,7 +93,7 @@ def _gray_png(w: int, h: int, value: int) -> bytes:
     return pix.tobytes("png")
 
 
-def _printed_body_png() -> bytes:
+def _printed_body_png(include_heading: bool = True) -> bytes:
     """A raster image OF printed text — what a real scanner produces.
     Rendered from a throwaway text page so OCR has genuine glyphs to
     read; the resulting page has an image, but NO text layer.
@@ -105,7 +105,8 @@ def _printed_body_png() -> bytes:
     cannot restore detail the scan never captured (ledger #16)."""
     tmp = pymupdf.open()
     p = tmp.new_page(width=PAGE_W, height=PAGE_H)
-    p.insert_text((72, 90), "4. Delivery Conditions", fontsize=16, fontname="hebo")
+    if include_heading:
+        p.insert_text((72, 90), "4. Delivery Conditions", fontsize=16, fontname="hebo")
     p.insert_textbox(
         pymupdf.Rect(72, 120, PAGE_W - 72, 500), LOREM * 3, fontsize=12, fontname="helv"
     )
@@ -114,12 +115,14 @@ def _printed_body_png() -> bytes:
     return png
 
 
-def _scan_page(doc: pymupdf.Document, header: str | None) -> None:
+def _scan_page(doc: pymupdf.Document, header: str | None, include_heading: bool = True) -> None:
     """Full-page raster image of printed text, optionally with a
     text-layer header on top — the header variant is the trap
-    SCAN_IMAGE_COVERAGE exists to catch."""
+    SCAN_IMAGE_COVERAGE exists to catch. include_heading=False makes the
+    page a CONTINUATION of the previous scan (body only), so consecutive
+    scanned pages don't read as accidental duplicates in merged.md."""
     page = doc.new_page(width=PAGE_W, height=PAGE_H)
-    page.insert_image(pymupdf.Rect(0, 0, PAGE_W, PAGE_H), stream=_printed_body_png())
+    page.insert_image(pymupdf.Rect(0, 0, PAGE_W, PAGE_H), stream=_printed_body_png(include_heading))
     if header:
         page.insert_text((72, 40), header, fontsize=9, fontname="helv")
 
@@ -200,8 +203,11 @@ def _table_page(doc: pymupdf.Document) -> None:
     """Prose above a ruled 4x3 table — text-native, with real grid lines."""
     page = doc.new_page(width=PAGE_W, height=PAGE_H)
     page.insert_text((72, 72), "5. Price Schedule (extract)", fontsize=14, fontname="hebo")
+    # NB: insert_textbox renders NOTHING if the text overflows the rect —
+    # it refuses rather than truncates. One LOREM fits; two silently
+    # vanished and took a test premise with them.
     page.insert_textbox(
-        pymupdf.Rect(72, 100, PAGE_W - 72, 180), LOREM * 2, fontsize=10, fontname="helv"
+        pymupdf.Rect(72, 100, PAGE_W - 72, 180), LOREM, fontsize=10, fontname="helv"
     )
     _draw_ruled_table(page, [HEADER_ROW, *PRICE_ROWS], y0=220.0)
 
@@ -249,8 +255,13 @@ def build_sample(path: Path) -> Path:
     _prose_page(doc, "7. Payment Terms (contd.)", numbered=True)  # p1
     _scan_page(doc, header=None)  # p2
     # Header must exceed MIN_TEXT_CHARS (50) or this page stops being a trap:
-    # the point is that text length alone would say TEXT_NATIVE.
-    _scan_page(doc, header="DOCUMENT NO 42/2026 - SECTION 4 - CONTINUED - PAGE 17 OF 300")  # p3
+    # the point is that text length alone would say TEXT_NATIVE. Body-only
+    # (continuation) so pages 2-3 don't read as duplicated content.
+    _scan_page(
+        doc,
+        header="DOCUMENT NO 42/2026 - SECTION 4 - CONTINUED - PAGE 17 OF 300",
+        include_heading=False,
+    )  # p3
     _drawing_page(doc)  # p4
     _title_page(doc)  # p5
     _table_page(doc)  # p6

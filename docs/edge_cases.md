@@ -270,4 +270,70 @@ reference this file; this file references code. Grows with each phase.
 
 ---
 
-Phase 6 appends its section here when it lands.
+## Phase 6 — Assembly + chunking
+
+### 22. `insert_textbox` silently renders NOTHING on overflow
+
+- **Symptom:** the sample's page-6 prose never existed: PyMuPDF's
+  `insert_textbox` does not truncate text that overflows its rect — it
+  refuses to render *anything* and only signals via a negative return
+  value nobody checks. Invisible until a Phase-6 test asserted on that
+  paragraph.
+- **Handling:** `handled` in the generator (text sized to fit, loud
+  comment). The transferable lesson: APIs that signal failure through
+  return values instead of exceptions produce bugs that surface far from
+  their cause — a test that asserts on *content*, not just on "no
+  crash", is what catches them.
+
+### 23. Dedup by center containment, not intersection
+
+- **Symptom:** table bboxes are padded (stage 4) or slightly generous
+  (find_tables); any-intersection dedup would delete the prose line that
+  merely touches a table's padded edge — silent text loss, the failure
+  class this pipeline is designed to never have.
+- **Handling:** `handled` — a text unit dies only when its bbox CENTER
+  lies inside a table span. A unit genuinely inside a table has its
+  center there; a neighbor never does.
+
+### 24. Hand-rolled splitter and estimated token counts
+
+- **Symptom:** chunk sizing needs a tokenizer and a splitting library;
+  both are dependencies with API drift.
+- **Handling:** `accepted` — a ~20-line paragraph/sentence splitter
+  (never splits mid-sentence) and ~4-chars/token estimation. This repo
+  exists to show internals; the seams are one function each.
+- **Production note:** swap `split_text()` for a chunking library
+  (Chonkie et al.) and `_estimate_tokens()` for the embedding model's
+  real tokenizer. Nothing else changes — that isolation is the design.
+
+### 25. Sparse-OCR pages: heading detection degrades gracefully
+
+- **Symptom:** on a scanned page whose only OCR-visible text is its
+  heading (e.g. a table-only page, where Tesseract skips ruled cells —
+  case 19), the per-page body font size (case 17's fix) *equals* the
+  heading size, so the size rule cannot fire and the heading lands as a
+  TEXT chunk under the previous section's breadcrumb.
+- **Handling:** `accepted` — two correct fixes composing into a small
+  gap. The content is preserved and retrievable; only its depth in the
+  heading tree is lost. Visible live in the sample: the scanned annex's
+  heading chunks as text. A fix (numbered-pattern rule without the bold
+  requirement for OCR sources) is noted but not worth its false-positive
+  risk yet.
+
+### 26. Scanner-stamped headers/footers pollute content
+
+- **Symptom:** a repeating page header ("DOCUMENT NO 42/2026 - PAGE 17
+  OF 300") lands inside prose chunks: on scanned pages the OCR render
+  includes the stamped text layer, and nothing distinguishes it from
+  body text. Visible live in the sample's merged.md.
+- **Handling:** `accepted` for now — it costs retrieval a little noise,
+  never correctness.
+- **Production note:** the standard fix is repetition analysis: lines
+  occurring on many pages at the same y-position are headers/footers —
+  strip them before assembly. Needs a real multi-page corpus to tune;
+  pointless to fake on a 10-page synthetic.
+
+---
+
+The pipeline is complete; future phases (retrieval, evaluation) extend
+from the chunk store, not this file.

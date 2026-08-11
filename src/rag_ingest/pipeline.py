@@ -34,10 +34,10 @@ pipeline change):
         stages/04_layout.jsonl        # YOLO regions, px AND pdf boxes
         stages/05_ocr_units.jsonl     # scanned-page units via Tesseract
         stages/06_tables.jsonl        # tiered ladder results + stitching
-        stages/07_chunks.jsonl                                   [Phase 6]
+        stages/07_chunks.jsonl        # THE output: retrieval-ready chunks
         debug/renders/            # downscaled page JPEGs (what YOLO saw)
         figures/                  # full-quality stored PNGs
-        merged.md                                                [Phase 5]
+        merged.md                 # human-review markdown (never authoritative)
         manifest.json             # summary: counts, timings, review flags
 """
 
@@ -51,7 +51,7 @@ from pathlib import Path
 
 import pymupdf
 
-from . import local_extract, ocr, render, tables
+from . import assemble, chunking, local_extract, ocr, render, tables
 from .config import FIGURE_DPI, RENDER_DPI
 from .layout import LayoutDetector
 from .models import PageKind, Source, Unit, UnitType
@@ -157,12 +157,23 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
         detector = LayoutDetector()
         render_meta: list[dict] = []
         regions = []
+        drawing_units: list[Unit] = []
         t_render = t_layout = 0.0
         for r in records:
             page = doc.load_page(r.page)
             if r.kind == PageKind.DRAWING:
                 key = render.store_drawing_page(page, r.page, doc_out)
                 render_meta.append({"page": r.page, "drawing_figure_key": key})
+                # The whole page is the figure — enters assembly as a unit.
+                drawing_units.append(
+                    Unit(
+                        page=r.page,
+                        bbox=(page.rect.x0, page.rect.y0, page.rect.x1, page.rect.y1),
+                        type=UnitType.FIGURE,
+                        storage_key=key,
+                        source=Source.PYMUPDF,
+                    )
+                )
                 continue
 
             t0 = time.perf_counter()
@@ -259,6 +270,19 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
         timings["tables"] = round(time.perf_counter() - t0, 3)
         _write_stage_jsonl(doc_out, "06_tables.jsonl", [t.to_dict() for t in table_results])
 
+        # ---- STAGE 7: assembly + chunking ------------------------------
+        # Everything converges: all units from all sources, deduplicated
+        # against table regions, walked in reading order, chunked per
+        # heading section. This is where 0-based pages become 1-based.
+        t0 = time.perf_counter()
+        all_units = units + ocr_units + drawing_units
+        walk = assemble.build_walk(all_units, table_results)
+        chunks, merged_md = chunking.chunk_document(doc_id, walk)
+        timings["assemble"] = round(time.perf_counter() - t0, 3)
+        _write_stage_jsonl(doc_out, "07_chunks.jsonl", [c.to_dict() for c in chunks])
+        (doc_out / "merged.md").write_text(merged_md, encoding="utf-8")
+        log.info("merged.md -> %s", doc_out / "merged.md")
+
         counts: dict[str, int] = {}
         for r in records:
             counts[r.kind.value] = counts.get(r.kind.value, 0) + 1
@@ -278,6 +302,14 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
                 "count": len(table_results),
                 "multi_page": [t.table_id for t in table_results if len(t.pages) > 1],
                 "needs_review": [t.table_id for t in table_results if t.needs_review],
+            },
+            "chunks": {
+                "count": len(chunks),
+                "by_type": {
+                    kind: sum(1 for c in chunks if c.type.value == kind)
+                    for kind in {c.type.value for c in chunks}
+                },
+                "needs_review": [c.chunk_id for c in chunks if c.needs_review],
             },
             "layout_regions": {
                 label: sum(1 for g in regions if g.label == label)
