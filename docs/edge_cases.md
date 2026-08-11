@@ -68,4 +68,58 @@ reference this file; this file references code. Grows with each phase.
 
 ---
 
-Phases 2–6 append their sections here as they land.
+## Phase 2 — Local extraction
+
+### 6. Span vs line vs block granularity
+
+- **Symptom:** emitting a unit per *span* fragments "the **supplier** shall"
+  into three units; per *block* merges a heading into its following
+  paragraph. Both wreck chunk quality downstream.
+- **Handling:** `handled` — classify per LINE (a line is heading or body,
+  never both), merge consecutive body lines of a block into one paragraph
+  unit ([local_extract.py](../src/rag_ingest/local_extract.py)). The
+  line's identity comes from its *dominant span by character count*, so a
+  single bold word can't turn a sentence into a heading.
+
+### 7. Duplicate / degenerate vector segments
+
+- **Symptom:** PDF writers emit the same rule twice (path-closing
+  segments, re-stroked borders) — MuPDF reports each one, inflating raw
+  segment counts. Found live: our own sample's 9-line grid came back as
+  10 items, the extra being a reversed duplicate of the last vertical.
+  Related trap: a zero-height line is an "empty" rect in PyMuPDF, and
+  empty rects are *ignored* by rect union — so unioning line rects
+  silently produces a garbage bbox.
+- **Handling:** `handled` — segments dedupe into sets of rounded
+  coordinate tuples; the grid bbox is explicit min/max, never Rect union.
+
+### 8. Tiny embedded images (logos, watermarks, bullet glyphs)
+
+- **Symptom:** a letterhead logo on every page becomes hundreds of
+  near-identical figure chunks that retrieval can hit instead of content.
+- **Handling:** `handled` — images under 0.5% of page area are skipped
+  (`FIGURE_MIN_AREA_FRAC`).
+- **Production note:** a real system might also dedupe by image hash —
+  the same logo has the same xref/bytes on every page.
+
+### 9. Headings at body size, not bold, not numbered
+
+- **Symptom:** a document that styles headings only via spacing or color
+  defeats both heading rules; those headings become plain TEXT units.
+- **Handling:** `accepted` — the breadcrumb for affected sections
+  attaches to the nearest detected ancestor, which degrades retrieval
+  precision but never correctness.
+
+### 10. Text inside table regions is (currently) duplicated
+
+- **Symptom:** stage 2 extracts ALL text on a page — including text
+  inside tables. When stage 5 extracts the same table via the vision
+  path, the content would appear twice after assembly.
+- **Handling:** `flagged (forward)` — final table bboxes only exist after
+  stage 4 (YOLO); the dedup rule "drop text units whose bbox falls inside
+  a table region" is applied there, not here. Stage 2 deliberately emits
+  everything with exact bboxes so stage 4 *can* filter. See design spec §3.
+
+---
+
+Phases 3–6 append their sections here as they land.

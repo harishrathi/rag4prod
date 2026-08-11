@@ -35,7 +35,7 @@ recomputing — or re-paying for — earlier stages.
 | Phase | Stage | Status |
 | --- | --- | --- |
 | 1 | Project setup, contracts, triage | ✅ |
-| 2 | Local extraction (text, headings, figures, ruled tables) | ⬜ |
+| 2 | Local extraction (text, headings, figures, ruled tables) | ✅ |
 | 3 | Rendering + YOLO layout detection | ⬜ |
 | 4 | Gemini extraction (tables, scanned pages) | ⬜ |
 | 5 | Multi-page table stitching, assembly, chunking | ⬜ |

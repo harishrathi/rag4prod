@@ -9,8 +9,10 @@ into an assertion (see tests/test_triage.py).
 
 Page map (0-based) and the triage branch each page exists to exercise:
 
-    0  prose + headings                -> TEXT_NATIVE  (the easy case)
-    1  prose + numbered headings       -> TEXT_NATIVE  (heading detection, Phase 2)
+    0  prose + headings + figure      -> TEXT_NATIVE  (easy case; embedded-figure
+                                          extraction, Phase 2)
+    1  prose + numbered headings       -> TEXT_NATIVE  (heading detection incl. a
+                                          body-size bold numbered heading, Phase 2)
     2  full-page raster, no text       -> SCANNED      (classic scan)
     3  full-page raster + header text  -> SCANNED      (the header-over-scan TRAP:
                                           text length alone would say TEXT_NATIVE)
@@ -63,6 +65,17 @@ def _prose_page(doc: pymupdf.Document, heading: str, numbered: bool) -> None:
     page.insert_textbox(
         pymupdf.Rect(72, y, PAGE_W - 72, y + 320), LOREM * 6, fontsize=10, fontname="helv"
     )
+    if numbered:
+        # Heading at BODY size: only detectable via bold + clause numbering,
+        # exercising the second branch of the stage-2 heading rule.
+        page.insert_text((72, y + 340), "7.3.1 Delay Notices", fontsize=10, fontname="hebo")
+        page.insert_textbox(
+            pymupdf.Rect(72, y + 350, PAGE_W - 72, y + 470), LOREM * 2, fontsize=10, fontname="helv"
+        )
+    else:
+        # Embedded raster figure on a text-native page (~6% of page area:
+        # well above FIGURE_MIN_AREA_FRAC, far below SCAN_IMAGE_COVERAGE).
+        page.insert_image(pymupdf.Rect(72, y + 340, 292, y + 480), stream=_gray_png(220, 140, 180))
 
 
 def _gray_png(w: int, h: int, value: int) -> bytes:

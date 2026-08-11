@@ -55,3 +55,42 @@ DRAWING_MIN_SEGMENTS = 100
 # pipeline itself always works on full-quality PNGs in memory.
 DEBUG_IMAGE_MAX_DIM = 1200  # px, longest side of a debug image copy
 DEBUG_JPEG_QUALITY = 70  # good enough to eyeball, ~10x smaller than PNG
+
+# ---------------------------------------------------------------------------
+# STAGE 2 — Local extraction (rag_ingest/local_extract.py)
+# ---------------------------------------------------------------------------
+
+# Body font size is estimated from a sample of text-native pages spread
+# across the WHOLE document — front matter (covers, tables of contents,
+# forms) is typographically unrepresentative, so "first N pages" sampling
+# would skew the estimate on real documents.
+BODY_FONT_SAMPLE_PAGES = 60
+
+# A line is a heading when its font size is >= body_size * this ratio.
+# 1.15 catches 12pt headings over 10pt body. Headings set at exactly body
+# size are missed unless they are bold AND numbered (see regex below) —
+# an accepted gap, documented in docs/edge_cases.md.
+HEADING_SIZE_RATIO = 1.15
+
+# Bold lines that look like numbered clauses ("7.3 Liquidated Damages")
+# are headings even at body size. Numbering is also the strongest signal
+# stage 6 has for heading depth, so this regex is shared with assembly.
+HEADING_NUMBERED_RE = r"^\d+(\.\d+)*\.?\s+\S"
+
+# Embedded raster images smaller than this fraction of the page area are
+# skipped: they are almost always logos, watermarks, or bullet glyphs.
+# Storing them as figures adds noise chunks that retrieval can hit
+# instead of real content.
+FIGURE_MIN_AREA_FRAC = 0.005
+
+# DPI used when cropping embedded figures to PNG. Figures are stored, not
+# OCR'd, so this only affects visual quality of the stored artifact.
+FIGURE_DPI = 200
+
+# A page is marked as having a ruled grid when its vector drawings contain
+# at least this many axis-aligned horizontal AND vertical segments. Grids
+# are a cross-check for stage 4's table boxes, NOT a router — page borders
+# and letterhead rules false-positive too easily to gate YOLO on this
+# (see docs/design_spec.md §5).
+RULED_MIN_H_SEGMENTS = 4
+RULED_MIN_V_SEGMENTS = 4

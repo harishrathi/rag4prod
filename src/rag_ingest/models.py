@@ -67,6 +67,11 @@ class Unit:
     type: UnitType
     content: str = ""  # markdown/text; "" for figures (image is the artifact)
     level: int | None = None  # heading depth, TITLE units only
+    # Raw font size in points, TITLE units only. Levels can't be assigned
+    # per page (a 14pt heading might be level 1 in one chapter and level 2
+    # in another) — stage 6 clusters sizes document-wide, so TITLE units
+    # must carry the evidence until then.
+    font_size: float | None = None
     storage_key: str | None = None  # relative path of stored PNG, FIGURE units only
     source: Source = Source.PYMUPDF
     needs_review: bool = False  # extraction was lossy/failed; keep, but flag

@@ -134,10 +134,11 @@ def triage(doc: pymupdf.Document) -> list[TriageRecord]:
     Deliberately single-threaded; see the module docstring for why a
     thread pool would be a bug here.
     """
-    # Index explicitly rather than iterating the Document: doc[i] is typed
-    # as Page in the stubs, while iteration isn't — and the index is needed
-    # for the record anyway.
-    records = [triage_page(doc[i], i) for i in range(doc.page_count)]
+    # load_page rather than iterating the Document: iteration and
+    # __getitem__ are loosely typed in the stubs (getitem also accepts
+    # slices), load_page is typed -> Page — and the index is needed for
+    # the record anyway.
+    records = [triage_page(doc.load_page(i), i) for i in range(doc.page_count)]
 
     counts: dict[str, int] = {}
     for r in records:

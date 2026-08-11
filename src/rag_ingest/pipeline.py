@@ -28,13 +28,14 @@ pipeline change):
 
     output/<doc_id>/
         stages/01_triage.json     # decision log: kind + evidence per page
-        stages/02_units_local.jsonl                              [Phase 2]
+        stages/02_units_local.jsonl   # TITLE/TEXT/FIGURE units, one per line
+        stages/02_ruled_grids.json    # body font size + table-grid evidence
         stages/03_render.json                                    [Phase 3]
         stages/04_layout.jsonl                                   [Phase 3]
         stages/05_gemini.jsonl                                   [Phase 4]
         stages/06_chunks.jsonl                                   [Phase 5]
-        debug/                    # downscaled image copies      [Phase 2+]
-        figures/                  # full-quality stored PNGs     [Phase 2+]
+        debug/                    # downscaled image copies      [Phase 3+]
+        figures/                  # full-quality stored PNGs
         merged.md                                                [Phase 5]
         manifest.json             # summary: counts, timings, review flags
 """
@@ -49,6 +50,7 @@ from pathlib import Path
 
 import pymupdf
 
+from . import local_extract
 from .models import PageKind
 from .triage import TriageRecord, triage
 
@@ -65,6 +67,18 @@ def _write_stage(doc_out: Path, name: str, payload: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     log.info("stage artifact -> %s", path)
+    return path
+
+
+def _write_stage_jsonl(doc_out: Path, name: str, rows: list[dict]) -> Path:
+    """JSONL = one JSON object per line: greppable, diffable, streamable,
+    and 'go through it line by line' is meant literally."""
+    path = doc_out / "stages" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    log.info("stage artifact -> %s (%d records)", path, len(rows))
     return path
 
 
@@ -120,19 +134,37 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
             records = _load_triage(doc_out)
             log.info("stage 1 skipped, loaded %d records from artifact", len(records))
 
-        # ---- STAGE 2+: added phase by phase ----------------------------
-        # (debug flag will gate the downscaled image copies from Phase 2 on)
+        # ---- STAGE 2: local extraction (TEXT_NATIVE pages) -------------
+        page_kinds = {r.page: r.kind for r in records}
+        t0 = time.perf_counter()
+        body_size, units, grids = local_extract.extract(doc, page_kinds, doc_out)
+        timings["local_extract"] = round(time.perf_counter() - t0, 3)
+        _write_stage_jsonl(doc_out, "02_units_local.jsonl", [u.to_dict() for u in units])
+        _write_stage(
+            doc_out,
+            "02_ruled_grids.json",
+            {"body_font_size": body_size, "grids": [g.to_dict() for g in grids]},
+        )
+
+        # ---- STAGE 3+: added phase by phase ----------------------------
+        # (debug flag will gate the downscaled image copies from Phase 3 on)
         _ = debug
 
         counts: dict[str, int] = {}
         for r in records:
             counts[r.kind.value] = counts.get(r.kind.value, 0) + 1
+        unit_counts: dict[str, int] = {}
+        for u in units:
+            unit_counts[u.type.value] = unit_counts.get(u.type.value, 0) + 1
 
         manifest = {
             "doc_id": doc_id,
             "source_pdf": str(pdf_path),
             "page_count": doc.page_count,
             "counts": counts,
+            "body_font_size": body_size,
+            "unit_counts": unit_counts,
+            "ruled_grid_pages": [g.page for g in grids],
             "timings_secs": timings,
             # 0-based internally (see models.py); only Chunk.pages is 1-based.
             "page_kinds": {str(r.page): r.kind.value for r in records},
