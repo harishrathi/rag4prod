@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-ingest"
+version = "0.1.0"
+description = "RAG Learning"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Harish Rathi" }]
+requires-python = ">=3.12"
+dependencies = [
+    "pymupdf==1.28.2",   # Phase 1+: triage, extraction, rendering
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+rag-ingest = "rag_ingest.pipeline:main"
+
+# src layout: the package importable as `rag_ingest` lives in src/.
+# Standard practice for public packages — it guarantees tests run against
+# the *installed* package, never a same-named directory that happens to be
+# on the current working path.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
