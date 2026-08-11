@@ -180,10 +180,14 @@ HEADER_MATCH_RATIO = 0.8
 # STAGE 7 — Assembly + chunking (rag_ingest/assemble.py, chunking.py)
 # ---------------------------------------------------------------------------
 
-# Target chunk size in characters. ~4 chars/token for English prose, so
-# 2000 chars ≈ the classic 512-token chunk. The chunker splits on
-# paragraph boundaries first, sentences second — never mid-sentence.
-CHUNK_MAX_CHARS = 2000
+# Text chunk sizing, enforced by Chonkie's SentenceChunker with a REAL
+# tokenizer — "target 512 tokens" becomes "guaranteed under 512 tokens".
+# gpt2 is a proxy tokenizer until the retrieval side picks an embedding
+# model; swap CHUNK_TOKENIZER for that model's tokenizer then (different
+# tokenizers disagree by ~10-30% on number-dense text).
+CHUNK_SIZE_TOKENS = 512
+CHUNK_OVERLAP_TOKENS = 0
+CHUNK_TOKENIZER = "gpt2"
 
 # A merged multi-page table can exceed any chunk size. It stays
 # LOGICALLY atomic but is emitted as row groups of this many data rows,

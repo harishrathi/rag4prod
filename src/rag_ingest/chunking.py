@@ -17,12 +17,17 @@ each group repeats the header row and shares the table's table_id, so a
 retrieval hit lands on rows with their column meanings intact and a
 consumer can reassemble the whole table.
 
-The splitter is deliberately hand-rolled (~20 lines: paragraphs first,
-sentences second, never mid-sentence): this repo exists to show the
-internals. Production alternative: a chunking library (e.g. Chonkie's
-recursive markdown recipe) — swap it inside split_text() and nothing
-else changes. Token counts are estimated at ~4 chars/token; production
-would use the embedding model's real tokenizer.
+Splitting is delegated to Chonkie's SentenceChunker behind the
+split_text() seam. What the library buys over the hand-rolled splitter
+it replaced: REAL tokenizer-based sizing (chunks are guaranteed under
+CHUNK_SIZE_TOKENS, not estimated at ~4 chars/token) and maintained
+upgrade paths (overlap, semantic chunking). What it does NOT buy:
+smarter sentence boundaries — its default delimiters split after
+abbreviations ("e.g. ", "No. 42") exactly like a naive regex; that
+remains the quality ceiling either way. Chonkie's structure-aware
+recipes are useless here on purpose: document structure (headings,
+tables, figures) is exploded into typed units BEFORE chunking, so only
+flat section prose ever reaches the splitter.
 
 Page numbers: chunks carry 1-BASED pages — this module is the single
 place the internal 0-based convention converts (models.py docstring).
@@ -31,36 +36,45 @@ place the internal 0-based convention converts (models.py docstring).
 from __future__ import annotations
 
 import logging
-import re
+
+from chonkie import SentenceChunker
 
 from .assemble import WalkItem
-from .config import CHUNK_MAX_CHARS, TABLE_ROWS_PER_CHUNK
+from .config import (
+    CHUNK_OVERLAP_TOKENS,
+    CHUNK_SIZE_TOKENS,
+    CHUNK_TOKENIZER,
+    TABLE_ROWS_PER_CHUNK,
+)
 from .models import Chunk, Source, UnitType
 from .tables import cells_to_markdown
 
 log = logging.getLogger(__name__)
 
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_chunker: SentenceChunker | None = None
 
 
-def split_text(text: str, max_chars: int = CHUNK_MAX_CHARS) -> list[str]:
-    """Greedy split on paragraph boundaries, falling back to sentences.
-    Never splits mid-sentence; a single sentence longer than max_chars is
-    emitted whole (truncating it would corrupt meaning)."""
-    if len(text) <= max_chars:
-        return [text] if text.strip() else []
-    pieces: list[str] = []
-    buf = ""
-    for para in text.split("\n\n"):
-        parts = [para] if len(para) <= max_chars else _SENTENCE_END.split(para)
-        for part in parts:
-            if buf and len(buf) + len(part) + 1 > max_chars:
-                pieces.append(buf.strip())
-                buf = ""
-            buf = f"{buf} {part}".strip() if buf else part
-    if buf.strip():
-        pieces.append(buf.strip())
-    return pieces
+def _get_chunker() -> SentenceChunker:
+    """Singleton: the tokenizer load is the expensive part. NB the
+    constructor kwarg is `tokenizer` in chonkie 1.7 — it has been renamed
+    across releases, which is why the version is pinned (spec §11)."""
+    global _chunker
+    if _chunker is None:
+        _chunker = SentenceChunker(
+            tokenizer=CHUNK_TOKENIZER,
+            chunk_size=CHUNK_SIZE_TOKENS,
+            chunk_overlap=CHUNK_OVERLAP_TOKENS,
+        )
+    return _chunker
+
+
+def split_text(text: str) -> list[tuple[str, int]]:
+    """Section prose -> (piece, token_count) pairs, sized by the real
+    tokenizer. This function is the chunking-library seam: everything
+    else in the pipeline is agnostic to what implements it."""
+    if not text.strip():
+        return []
+    return [(c.text.strip(), c.token_count) for c in _get_chunker().chunk(text)]
 
 
 def _estimate_tokens(text: str) -> int:
@@ -98,7 +112,7 @@ class _ChunkBuilder:
         text = "\n\n".join(self._texts)
         pages = sorted(p + 1 for p in self._pages)  # THE 0->1-based conversion
         crumb = self._breadcrumb()
-        for piece in split_text(text):
+        for piece, piece_tokens in split_text(text):
             embedding = f"{crumb}\n\n{piece}" if crumb else piece
             self._emit(
                 Chunk(
@@ -109,7 +123,9 @@ class _ChunkBuilder:
                     headings=[h for _, h in self.stack],
                     pages=pages,
                     source=self._source,
-                    token_count=_estimate_tokens(embedding),
+                    # Real tokenizer count for the prose + estimate for the
+                    # short breadcrumb prefix.
+                    token_count=piece_tokens + (_estimate_tokens(crumb) if crumb else 0),
                 )
             )
         self._texts, self._pages = [], set()

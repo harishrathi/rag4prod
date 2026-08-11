@@ -295,16 +295,22 @@ reference this file; this file references code. Grows with each phase.
   lies inside a table span. A unit genuinely inside a table has its
   center there; a neighbor never does.
 
-### 24. Hand-rolled splitter and estimated token counts
+### 24. Text splitting: library behind a seam (revised)
 
-- **Symptom:** chunk sizing needs a tokenizer and a splitting library;
-  both are dependencies with API drift.
-- **Handling:** `accepted` — a ~20-line paragraph/sentence splitter
-  (never splits mid-sentence) and ~4-chars/token estimation. This repo
-  exists to show internals; the seams are one function each.
-- **Production note:** swap `split_text()` for a chunking library
-  (Chonkie et al.) and `_estimate_tokens()` for the embedding model's
-  real tokenizer. Nothing else changes — that isolation is the design.
+- **Symptom:** chunk sizing needs a tokenizer and sentence splitting;
+  a ~4-chars/token estimate can overshoot an embedding model's real
+  limit by 20-30% on number-dense text.
+- **Handling:** `handled` — started hand-rolled (to learn the shape),
+  then swapped Chonkie's SentenceChunker in behind the `split_text()`
+  seam: chunks are now sized by a real tokenizer (gpt2 as proxy until
+  the retrieval side picks an embedding model). The API-drift warning
+  proved true live: the constructor kwarg is `tokenizer` in 1.7.0 and
+  was named differently in other releases — hence the exact pin.
+- **Honest limits:** the library's sentence boundaries are no smarter
+  than a naive regex (splits after "e.g. ", "No. 42"); its
+  structure-aware recipes are deliberately unused because structure is
+  exploded into typed units *before* chunking. The seam is the design:
+  swapping implementations touched one function and one config block.
 
 ### 25. Sparse-OCR pages: heading detection degrades gracefully
 

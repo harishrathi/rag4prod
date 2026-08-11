@@ -117,8 +117,9 @@ def test_merged_md_contains_tables_and_headings(assembled):
 # --- Splitter ----------------------------------------------------------------
 
 
-def test_split_text_never_splits_mid_sentence():
-    text = "One sentence here. " * 300  # ~5700 chars
-    pieces = split_text(text, max_chars=2000)
-    assert len(pieces) >= 3
-    assert all(p.rstrip().endswith(".") for p in pieces)
+def test_split_text_respects_sentences_and_token_limit():
+    text = "One sentence here. " * 300  # ~1200 gpt2 tokens
+    pieces = split_text(text)
+    assert len(pieces) >= 2
+    assert all(t.rstrip().endswith(".") for t, _ in pieces)  # never mid-sentence
+    assert all(tokens <= 512 for _, tokens in pieces)  # REAL limit, not estimate
