@@ -179,7 +179,7 @@ VLM_MODEL = "gemini-3.6-flash"
 # Retries on 429/5xx/network errors: exponential backoff with jitter.
 # A page exhausting retries becomes one empty needs_review unit — pages
 # never silently vanish.
-VLM_MAX_RETRIES = 4
+VLM_MAX_RETRIES = 3
 
 # Verification (vlm_extract.verify_page_markdown). VLMs fail as fluent
 # lies, not symbol soup — so the checks look for repetition loops,

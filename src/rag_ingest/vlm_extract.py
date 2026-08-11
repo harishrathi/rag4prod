@@ -184,10 +184,19 @@ class GeminiClient:
                     config=types.GenerateContentConfig(temperature=0.0),
                 )
                 usage = resp.usage_metadata
-                return VlmResponse(
+                out = VlmResponse(
                     text=resp.text or "",
                     input_tokens=(usage.prompt_token_count or 0) if usage else 0,
                     output_tokens=(usage.candidates_token_count or 0) if usage else 0,
+                )
+                # An HTTP-200 response with NO text is a real failure mode
+                # (observed live: 0 candidate tokens on a normal page).
+                # Retry it like a 5xx; if it stays empty, return it and
+                # let verification flag the page.
+                if out.text.strip() or attempt == VLM_MAX_RETRIES:
+                    return out
+                log.warning(
+                    "empty response (attempt %d/%d) — retrying", attempt + 1, VLM_MAX_RETRIES
                 )
             except errors.APIError as e:
                 if e.code not in (429, 500, 502, 503, 504) or attempt == VLM_MAX_RETRIES:
@@ -230,6 +239,10 @@ class CachedVlmClient:
                 cached=True,
             )
         resp = self.inner.generate(png, prompt)
+        if not resp.text.strip():
+            # Never cache an empty response: caching it would make a
+            # transient engine failure permanent across every re-run.
+            return resp
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(

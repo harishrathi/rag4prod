@@ -8,3 +8,5 @@ __pycache__/
 .ruff_cache/
 sample_data/*.zip
 sample_data/real/
+output_baseline_tesseract/
+output2/
