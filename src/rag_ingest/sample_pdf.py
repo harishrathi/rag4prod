@@ -152,6 +152,14 @@ PRICE_ROWS = [
     ["2", "Concrete M25", "5400.00"],
     ["3", "Steel reinforcement", "62.50"],
 ]
+# Distinct rows for the scanned annex table (page 7) so merged.md doesn't
+# read as an accidental duplicate of the page-6 table. Ground truth for
+# the tier-2 (grid + OCR) tests.
+ANNEX_ROWS = [
+    ["A1", "Site clearance", "75.00"],
+    ["A2", "Dewatering", "150.00"],
+    ["A3", "Backfilling", "88.00"],
+]
 # Rows for the multi-page table (pages 8-9): header + 6 rows on page 8,
 # repeated header + 4 rows on page 9. Ground truth for stitching tests.
 CONT_ROWS_P8 = [
@@ -219,7 +227,7 @@ def _scanned_table_page(doc: pymupdf.Document) -> None:
     tmp = pymupdf.open()
     p = tmp.new_page(width=PAGE_W, height=PAGE_H)
     p.insert_text((72, 90), "5.2 Price Schedule (scanned annex)", fontsize=15, fontname="hebo")
-    _draw_ruled_table(p, [HEADER_ROW, *PRICE_ROWS], y0=160.0, fontsize=11)
+    _draw_ruled_table(p, [HEADER_ROW, *ANNEX_ROWS], y0=160.0, fontsize=11)
     png = p.get_pixmap(dpi=200).tobytes("png")
     tmp.close()
     page = doc.new_page(width=PAGE_W, height=PAGE_H)

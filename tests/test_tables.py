@@ -48,8 +48,8 @@ def test_tier2_recovers_grid_and_cells_from_pixels(doc):
     assert raw.source == "grid_ocr"
     assert len(raw.cells) == 4 and len(raw.cells[0]) == 3
     assert "Item" in raw.cells[0][0]
-    assert "Excavation" in raw.cells[1][1]
-    assert "120" in raw.cells[1][2]  # OCR may fuzz the decimals; digits must survive
+    assert "Dewatering" in raw.cells[2][1]
+    assert "75" in raw.cells[1][2]  # OCR may fuzz the decimals; digits must survive
     assert validate_cells(raw.cells) is None
 
 
