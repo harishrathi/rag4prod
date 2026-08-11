@@ -33,15 +33,18 @@ import logging
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pymupdf
 
 from .config import (
     FIGURE_DPI,
+    FURNITURE_MIN_REPEATS,
     GRID_DARK_THRESHOLD,
     GRID_LINE_MIN_COVERAGE,
     HEADER_MATCH_RATIO,
+    OCR_LANGUAGES,
     OCR_MIN_QUALITY,
     RENDER_DPI,
     TABLE_CONT_BOTTOM_FRAC,
@@ -174,7 +177,8 @@ def _unmerge_native(tab) -> tuple[list[list[str]], int, list[list[int]]]:
 
 def extract_native_tables(page: pymupdf.Page, page_index: int) -> list[RawTable]:
     out: list[RawTable] = []
-    for tab in page.find_tables().tables:
+    finder = page.find_tables()
+    for tab in finder.tables if finder is not None else []:
         cells, header_rows, merges = _unmerge_native(tab)
         out.append(
             RawTable(
@@ -210,6 +214,35 @@ def _line_centers(mask: np.ndarray) -> list[float]:
     if start is not None:
         centers.append((start + len(mask) - 1) / 2)
     return centers
+
+
+def drop_empty_lines(
+    cells: list[list[str]], merges: list[list[int]], header_rows: int
+) -> tuple[list[list[str]], list[list[int]], int]:
+    """Remove all-empty rows/columns from a grid-OCR matrix (ledger #29).
+
+    Vector-crisp pages rerouted to the OCR path (broken text layers)
+    have page borders and table borders millimeters apart — the pixel
+    grid reads the space between them as extra rows/columns of nothing.
+    An all-empty line carries no information, so dropping it is safe;
+    merges are remapped (and clipped) onto the kept indices."""
+    if not cells:
+        return cells, merges, header_rows
+    keep_r = [i for i, row in enumerate(cells) if any(c.strip() for c in row)]
+    keep_c = [j for j in range(len(cells[0])) if any(row[j].strip() for row in cells)]
+    if len(keep_r) == len(cells) and len(keep_c) == len(cells[0]):
+        return cells, merges, header_rows
+    rmap = {old: new for new, old in enumerate(keep_r)}
+    cmap = {old: new for new, old in enumerate(keep_c)}
+    new_cells = [[cells[r][c] for c in keep_c] for r in keep_r]
+    new_merges: list[list[int]] = []
+    for r0, c0, rs, cs in merges:
+        rows = [rmap[r] for r in range(r0, r0 + rs) if r in rmap]
+        cols = [cmap[c] for c in range(c0, c0 + cs) if c in cmap]
+        if rows and cols and (len(rows) > 1 or len(cols) > 1):
+            new_merges.append([rows[0], cols[0], len(rows), len(cols)])
+    new_header = max(1, sum(1 for r in range(header_rows) if r in rmap))
+    return new_cells, new_merges, new_header
 
 
 def extract_scanned_table(page: pymupdf.Page, page_index: int, region: BBox) -> RawTable:
@@ -261,14 +294,14 @@ def extract_scanned_table(page: pymupdf.Page, page_index: int, region: BBox) -> 
         x0, x1 = int(v_centers[col]) + 3, int(v_centers[col + 1]) - 2
         if x1 <= x0:
             return True
-        return dark[lo:hi, x0:x1].any(axis=0).mean() > GRID_LINE_MIN_COVERAGE
+        return bool(dark[lo:hi, x0:x1].any(axis=0).mean() > GRID_LINE_MIN_COVERAGE)
 
     def _v_border(line: int, row: int) -> bool:
         lo, hi = max(0, int(v_centers[line]) - 2), int(v_centers[line]) + 3
         y0, y1 = int(h_centers[row]) + 3, int(h_centers[row + 1]) - 2
         if y1 <= y0:
             return True
-        return dark[y0:y1, lo:hi].any(axis=1).mean() > GRID_LINE_MIN_COVERAGE
+        return bool(dark[y0:y1, lo:hi].any(axis=1).mean() > GRID_LINE_MIN_COVERAGE)
 
     # Union-find over grid cells: neighbors with no border between them
     # are one logical (merged) cell.
@@ -307,7 +340,7 @@ def extract_scanned_table(page: pymupdf.Page, page_index: int, region: BBox) -> 
 
     clean_pix = pymupdf.Pixmap(pymupdf.csRGB, pix.width, pix.height, clean.tobytes(), False)
     ocr_doc = pymupdf.open(
-        "pdf", clean_pix.pdfocr_tobytes(language="eng", tessdata=ensure_tessdata())
+        "pdf", clean_pix.pdfocr_tobytes(language=OCR_LANGUAGES, tessdata=ensure_tessdata())
     )
 
     # The wrapper PDF's page is NOT guaranteed to be 1 px = 1 pt (pdfocr
@@ -322,7 +355,10 @@ def extract_scanned_table(page: pymupdf.Page, page_index: int, region: BBox) -> 
     buckets: list[list[list[tuple[float, float, str]]]] = [
         [[] for _ in range(cols)] for _ in range(rows)
     ]
-    for x0, y0, x1, y1, word, *_ in opage.get_text("words"):
+    # get_text("words") returns (x0, y0, x1, y1, word, ...) tuples; the
+    # stubs type the mode union loosely, so narrow it explicitly.
+    words = cast(list[tuple[float, float, float, float, str]], opage.get_text("words"))
+    for x0, y0, x1, y1, word, *_ in words:
         cx, cy = (x0 + x1) / 2 * wx, (y0 + y1) / 2 * wy
         row = next((i for i in range(rows) if h_centers[i] <= cy < h_centers[i + 1]), None)
         col = next((j for j in range(cols) if v_centers[j] <= cx < v_centers[j + 1]), None)
@@ -369,6 +405,7 @@ def extract_scanned_table(page: pymupdf.Page, page_index: int, region: BBox) -> 
         clip.x0 + v_centers[-1] * sx,
         clip.y0 + h_centers[-1] * sy,
     )
+    cells, merges, header_rows = drop_empty_lines(cells, merges, header_rows)
     return RawTable(
         page=page_index,
         bbox=bbox,
@@ -571,12 +608,35 @@ def _merge_chain(chain: list[RawTable]) -> tuple[list[list[str]], list[list[int]
 # ---------------------------------------------------------------------------
 
 
+def _suppress_repeated_suspects(raw: list[RawTable]) -> list[RawTable]:
+    """Drop yolo_only suspects that recur at the same position on many
+    pages (ledger #30). A real borderless table lives at one place in a
+    document; a bordered page-title box lives at the same spot on EVERY
+    page — YOLO calls it a table each time, and each one would open a
+    needs_review item for a human. Repetition across
+    FURNITURE_MIN_REPEATS distinct pages is the tell."""
+    groups: dict[tuple[int, ...], list[RawTable]] = {}
+    for t in raw:
+        if t.source == "yolo_only":
+            groups.setdefault(tuple(round(v / 10) for v in t.bbox), []).append(t)
+    drop = {
+        id(t)
+        for g in groups.values()
+        if len({t.page for t in g}) >= FURNITURE_MIN_REPEATS
+        for t in g
+    }
+    if drop:
+        log.info("suppressed %d repeated page-furniture table suspect(s)", len(drop))
+    return [t for t in raw if id(t) not in drop]
+
+
 def finalize(
     raw: list[RawTable],
     page_heights: dict[int, float],
     doc: pymupdf.Document,
     doc_out: Path,
 ) -> list[TableResult]:
+    raw = _suppress_repeated_suspects(raw)
     results: list[TableResult] = []
     for chain in stitch(raw, page_heights):
         first = chain[0]
@@ -591,6 +651,15 @@ def finalize(
             quality = ocr_quality_score(" ".join(c for row in cells for c in row))
             if quality < OCR_MIN_QUALITY:
                 reason = f"OCR quality {quality:.2f} below {OCR_MIN_QUALITY} (garbage text?)"
+        if reason is None and first.source == "find_tables":
+            # Native cells can carry mojibake on pages whose text layer is
+            # only mildly broken (below triage's reroute threshold,
+            # ledger #29) — the same junk-char tell flags them for review.
+            from .triage import JUNK_CHARS_RE
+
+            n_junk = sum(1 for row in cells for c in row if JUNK_CHARS_RE.search(c))
+            if n_junk:
+                reason = f"text layer junk in {n_junk} cell(s) — broken font encoding"
 
         result = TableResult(
             table_id=table_id,

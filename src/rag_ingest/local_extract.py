@@ -49,6 +49,7 @@ from .config import (
     RULED_MIN_V_SEGMENTS,
 )
 from .models import BBox, PageKind, Source, Unit, UnitType
+from .triage import JUNK_CHARS_RE
 
 log = logging.getLogger(__name__)
 
@@ -201,13 +202,20 @@ def extract_page(
         def flush_paragraph() -> None:
             nonlocal para_lines, para_bbox
             if para_lines and para_bbox is not None:
+                content = " ".join(para_lines)
                 units.append(
                     Unit(
                         page=page_index,
                         bbox=_bbox(para_bbox),
                         type=UnitType.TEXT,
-                        content=" ".join(para_lines),
+                        content=content,
                         source=source,
+                        # Safety net under triage's page-level CMap guard
+                        # (ledger #29): a page mostly-clean enough to stay
+                        # native can still carry a few mojibake units —
+                        # flag them, never ship them silently.
+                        needs_review=source == Source.PYMUPDF
+                        and JUNK_CHARS_RE.search(content) is not None,
                     )
                 )
             para_lines, para_bbox = [], None

@@ -32,15 +32,38 @@ complexity here. We take (b) on purpose.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import asdict, dataclass
 from typing import cast
 
 import pymupdf
 
-from .config import DRAWING_MIN_SEGMENTS, MIN_TEXT_CHARS, SCAN_IMAGE_COVERAGE
+from .config import (
+    DRAWING_MIN_SEGMENTS,
+    MIN_TEXT_CHARS,
+    SCAN_IMAGE_COVERAGE,
+    TEXT_LAYER_JUNK_MIN,
+    TEXT_LAYER_JUNK_RATIO,
+)
 from .models import PageKind
 
 log = logging.getLogger(__name__)
+
+# Junk characters that healthy text layers NEVER contain: C0 controls
+# (except tab/newline/CR, which the whitespace strip removes anyway),
+# U+FFFD replacement chars, and Private Use Area codepoints. Their
+# presence means the font's ToUnicode CMap is broken — the page renders
+# fine but its text layer is lying (ledger #29).
+JUNK_CHARS_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f�-]")
+
+
+def text_layer_junk(text: str) -> tuple[int, float]:
+    """(junk char count, junk ratio) over non-whitespace text."""
+    compact = "".join(text.split())
+    if not compact:
+        return 0, 0.0
+    n = len(JUNK_CHARS_RE.findall(compact))
+    return n, n / len(compact)
 
 
 @dataclass
@@ -92,6 +115,22 @@ def triage_page(page: pymupdf.Page, page_index: int) -> TriageRecord:
         )
 
     if len(text) >= MIN_TEXT_CHARS:
+        # --- Guard: broken ToUnicode CMap (ledger #29) -------------------
+        # The text layer can be PRESENT but lying: glyphs render fine while
+        # mapping to garbage codepoints (typical for custom-encoded Indic
+        # fonts). Local extraction would emit mojibake; OCR reads the
+        # rendered glyphs correctly, so the page reroutes to the OCR path.
+        junk, junk_ratio = text_layer_junk(text)
+        if junk >= TEXT_LAYER_JUNK_MIN or junk_ratio >= TEXT_LAYER_JUNK_RATIO:
+            return TriageRecord(
+                page=page_index,
+                kind=PageKind.SCANNED,
+                text_chars=len(text),
+                max_image_coverage=round(max_coverage, 3),
+                drawing_segments=None,
+                reason=f"text layer corrupt: {junk} junk chars ({junk_ratio:.1%}) — "
+                f"broken font-to-Unicode map; rerouted to OCR",
+            )
         return TriageRecord(
             page=page_index,
             kind=PageKind.TEXT_NATIVE,
@@ -160,9 +199,9 @@ def triage(doc: pymupdf.Document, fix_orientation: bool = True) -> list[TriageRe
             if delta:
                 page.set_rotation((page.rotation + delta) % 360)
                 r.rotation_applied = delta
-                r.reason += f"; rotated {delta} deg (OCR quality {before:.2f} -> {after:.2f})"
+                r.reason += f"; rotated {delta} deg (real words {before} -> {after})"
                 log.info(
-                    "p%04d: orientation fixed by %d deg (quality %.2f -> %.2f)",
+                    "p%04d: orientation fixed by %d deg (real words %d -> %d)",
                     r.page,
                     delta,
                     before,

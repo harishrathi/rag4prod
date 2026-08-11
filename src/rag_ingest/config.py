@@ -44,6 +44,20 @@ SCAN_IMAGE_COVERAGE = 0.70
 # PyMuPDF may report one committed shape as a single path with N items.)
 DRAWING_MIN_SEGMENTS = 100
 
+# Broken text layers (ledger #29): some PDF toolchains embed fonts whose
+# glyphs RENDER correctly but map to garbage codepoints in the text
+# layer (broken ToUnicode CMap) — endemic in bilingual documents with
+# custom-encoded Indic fonts. Healthy text layers contain ZERO C0
+# control characters, so any occurrence is diagnostic. A page whose
+# extracted text crosses either bound below has a lying text layer and
+# is rerouted to the OCR path (the rendered glyphs are fine — Tesseract
+# reads what the text layer cannot say). Below both bounds the page
+# stays native and the few mojibake units are flagged needs_review.
+# Measured on real documents: healthy pages 0 junk chars, broken pages
+# 20-451 per page.
+TEXT_LAYER_JUNK_MIN = 20  # absolute junk chars per page
+TEXT_LAYER_JUNK_RATIO = 0.005  # junk chars / non-whitespace chars
+
 # ---------------------------------------------------------------------------
 # Debug artifacts (all stages)
 # ---------------------------------------------------------------------------
@@ -140,12 +154,18 @@ YOLO_DEVICE = "cpu"
 # ---------------------------------------------------------------------------
 
 # PyMuPDF wheels BUNDLE libtesseract — no system install, no Docker. The
-# only external artifact is the language data file, auto-downloaded here.
-# tessdata_fast trades a little accuracy for 4x smaller files and faster
-# inference; clean machine-typeset print (our corpus) barely notices.
-# Swap in the 'tessdata_best' URL if OCR quality ever disappoints.
+# only external artifacts are the language data files, auto-downloaded
+# here. tessdata_fast trades a little accuracy for 4x smaller files and
+# faster inference; clean machine-typeset print (our corpus) barely
+# notices. Swap in the 'tessdata_best' URL if OCR quality disappoints.
+#
+# OCR_LANGUAGES is a Tesseract language string ('+'-separated). The
+# corpus is bilingual (Latin + Devanagari), and broken-CMap pages
+# (ledger #29) are OCR'd precisely BECAUSE their non-Latin text layer is
+# unusable — OCRing them in English only would re-lose the same text.
 TESSDATA_DIR = ".tessdata"
-TESSDATA_URL = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata"
+TESSDATA_BASE_URL = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/{lang}.traineddata"
+OCR_LANGUAGES = "eng+hin"
 
 # OCR render resolution. 300 DPI is Tesseract's canonical sweet spot:
 # below ~250 accuracy drops off; above ~350 costs time for no gain.
@@ -161,13 +181,31 @@ OCR_DPI = 300
 # page level even without per-word confidences.
 OCR_MIN_QUALITY = 0.65
 
-# Orientation recovery (rotated/landscape scans). Detection OCRs a small
-# render of the page and, if quality is below OCR_MIN_QUALITY, retries at
-# 90/180/270. Low DPI keeps the probe cheap (~4x faster than a full OCR
-# pass); the winning orientation must beat the current one by MIN_GAIN so
-# noise on a genuinely bad scan can't flip a page sideways.
+# Orientation recovery (rotated/landscape scans). No single signal is
+# reliable — measured at probe DPI on real + synthetic pages:
+#   * quality scores barely move with rotation on number-heavy pages
+#     (a rotated drawing: 0.57-0.61 in ALL four orientations), because
+#     digits carry no chirality;
+#   * word counts alone also fail: sideways OCR hallucinates dozens of
+#     short vowel-bearing fragments, and on that same drawing the WRONG
+#     rotation read the most "words" (23 vs 12).
+# So the rule uses both. Early exit: a page reading >= EXIT_WORDS real
+# words at its current orientation is upright (real upright scans
+# measured 85-130; sideways/junk pages 8-28) — one cheap probe, no
+# search. A rotation is APPLIED only when its quality score clears
+# APPLY_SCORE with a gap >= APPLY_GAIN over the current orientation
+# (the one signal that separated a genuinely rotated text page: 0.95 vs
+# 0.64) AND it reads >= APPLY_WORDS real words (blocks digit-only
+# pages, where scores sit near 1.0 in every orientation). Pages failing
+# both ways are left alone; the OCR quality gate flags their units.
+# Known limit: a 180-degree flip of a dense text page can read enough
+# junk "words" to take the early exit — real OSD is the production
+# answer (ledger #28).
 ORIENTATION_DPI = 120
-ORIENTATION_MIN_GAIN = 0.2
+ORIENTATION_EXIT_WORDS = 40
+ORIENTATION_APPLY_SCORE = 0.8
+ORIENTATION_APPLY_GAIN = 0.25
+ORIENTATION_APPLY_WORDS = 15
 
 # ---------------------------------------------------------------------------
 # STAGE 6 — Tables (rag_ingest/tables.py)
@@ -193,6 +231,16 @@ TABLE_CONT_TOP_FRAC = 0.12
 # tier-2 cells carry OCR noise). Above this ratio -> treated as a
 # repeated header and dropped from the continuation fragment.
 HEADER_MATCH_RATIO = 0.8
+
+# Page furniture (ledger #26/#30): headers/footers repeat at the same
+# position across pages. Two consumers: (a) text units in the top/bottom
+# band whose normalized text repeats on enough pages are stripped before
+# chunking; (b) YOLO table *suspects* at the same position on enough
+# pages are page decoration (bordered title boxes), not tables — they
+# would otherwise each open a needs_review item. Digits are normalized
+# out before matching ("Page 5 of 33" == "Page 6 of 33").
+FURNITURE_MIN_REPEATS = 3  # distinct pages before something is "repeating"
+FURNITURE_BAND_FRAC = 0.2  # top/bottom fraction of page height searched
 
 # ---------------------------------------------------------------------------
 # STAGE 7 — Assembly + chunking (rag_ingest/assemble.py, chunking.py)

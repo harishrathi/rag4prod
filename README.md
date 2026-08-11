@@ -42,7 +42,8 @@ recomputing — or re-paying for — earlier stages.
 | 4 | OCR for scanned pages (bundled Tesseract) | ✅ |
 | 5 | Tiered table extraction + multi-page stitching | ✅ |
 | 6 | Assembly, dedup, chunking | ✅ |
-| 7 | Complex tables (merged cells, spans → JSON + HTML), OCR quality gate + orientation recovery, real `--from-stage` resume, clean rejection | ✅ |
+| 7 | Complex tables (merged cells, spans → JSON + ASCII grid), OCR quality gate + orientation recovery, real `--from-stage` resume, clean rejection | ✅ |
+| 8 | Real-corpus hardening: broken text layers → multilingual OCR reroute, repeating header/footer suppression | ✅ |
 
 ## Setup
 

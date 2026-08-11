@@ -343,6 +343,8 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
             ]
             log.info("stage 5 skipped, loaded %d units from artifact", len(ocr_units))
 
+        page_heights = {r.page: doc.load_page(r.page).rect.height for r in records}
+
         # ---- STAGE 6: tables — tiered ladder + stitching ---------------
         if from_stage <= 6:
             t0 = time.perf_counter()
@@ -374,7 +376,6 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
                     raw_tables.append(
                         tables.RawTable(page=g.page, bbox=g.bbox_pdf, cells=[], source="yolo_only")
                     )
-            page_heights = {r.page: doc.load_page(r.page).rect.height for r in records}
             table_results = tables.finalize(raw_tables, page_heights, doc, doc_out)
             timings["tables"] = round(time.perf_counter() - t0, 3)
             _write_stage_jsonl(doc_out, "06_tables.jsonl", [t.to_dict() for t in table_results])
@@ -391,7 +392,7 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
         # heading section. This is where 0-based pages become 1-based.
         t0 = time.perf_counter()
         all_units = units + ocr_units + drawing_units
-        walk = assemble.build_walk(all_units, table_results)
+        walk = assemble.build_walk(all_units, table_results, page_heights)
         chunks, merged_md = chunking.chunk_document(doc_id, walk)
         timings["assemble"] = round(time.perf_counter() - t0, 3)
         _write_stage_jsonl(doc_out, "07_chunks.jsonl", [c.to_dict() for c in chunks])

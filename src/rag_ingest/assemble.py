@@ -31,13 +31,57 @@ import logging
 import re
 from dataclasses import dataclass
 
-from .config import MAX_HEADING_LEVEL
+from .config import FURNITURE_BAND_FRAC, FURNITURE_MIN_REPEATS, MAX_HEADING_LEVEL
 from .models import Unit, UnitType
 from .tables import TableResult
 
 log = logging.getLogger(__name__)
 
 _NUMBERED = re.compile(r"^(\d+(?:\.\d+)*)\.?\s")
+
+
+def _furniture_norm(text: str) -> str:
+    """Digits normalized out so 'Page 5 of 33' matches 'Page 6 of 33'."""
+    return re.sub(r"\d+", "#", " ".join(text.lower().split()))
+
+
+def strip_repeated_furniture(units: list[Unit], page_heights: dict[int, float]) -> list[Unit]:
+    """Drop repeating page headers/footers before assembly (ledger #26/#30).
+
+    A text/title unit is furniture when it sits in the top/bottom
+    FURNITURE_BAND_FRAC of its page AND its (normalized text, y-band)
+    appears on >= FURNITURE_MIN_REPEATS distinct pages. Repetition at the
+    same position is the signal — a clause quoted twice in the body never
+    matches, because body text doesn't recur at one fixed y across pages.
+    """
+    candidates: dict[tuple[int, str], set[int]] = {}
+    for u in units:
+        if u.type not in (UnitType.TEXT, UnitType.TITLE):
+            continue
+        h = page_heights.get(u.page, 842.0)
+        if u.bbox[1] <= h * FURNITURE_BAND_FRAC or u.bbox[3] >= h * (1 - FURNITURE_BAND_FRAC):
+            key = (round(u.bbox[1] / 8), _furniture_norm(u.content))
+            candidates.setdefault(key, set()).add(u.page)
+
+    furniture = {k for k, pages in candidates.items() if len(pages) >= FURNITURE_MIN_REPEATS}
+    if not furniture:
+        return units
+    kept: list[Unit] = []
+    dropped = 0
+    for u in units:
+        if (
+            u.type in (UnitType.TEXT, UnitType.TITLE)
+            and (round(u.bbox[1] / 8), _furniture_norm(u.content)) in furniture
+        ):
+            dropped += 1
+            continue
+        kept.append(u)
+    log.info(
+        "furniture: dropped %d repeating header/footer unit(s) (%d distinct)",
+        dropped,
+        len(furniture),
+    )
+    return kept
 
 
 @dataclass
@@ -104,8 +148,16 @@ def assign_heading_levels(units: list[Unit]) -> dict[int, int]:
     return levels
 
 
-def build_walk(units: list[Unit], tables: list[TableResult]) -> list[WalkItem]:
-    """Dedup'd units + tables -> one (page, y0)-ordered stream."""
+def build_walk(
+    units: list[Unit],
+    tables: list[TableResult],
+    page_heights: dict[int, float] | None = None,
+) -> list[WalkItem]:
+    """Dedup'd, furniture-stripped units + tables -> one (page, y0)-ordered
+    stream. Furniture stripping needs page heights; callers without them
+    (unit tests over synthetic walks) skip it by omission."""
+    if page_heights is not None:
+        units = strip_repeated_furniture(units, page_heights)
     units = dedup_units(units, tables)
     levels = assign_heading_levels(units)
 

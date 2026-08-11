@@ -336,12 +336,11 @@ reference this file; this file references code. Grows with each phase.
   OF 300") lands inside prose chunks: on scanned pages the OCR render
   includes the stamped text layer, and nothing distinguishes it from
   body text. Visible live in the sample's merged.md.
-- **Handling:** `accepted` for now — it costs retrieval a little noise,
-  never correctness.
-- **Production note:** the standard fix is repetition analysis: lines
-  occurring on many pages at the same y-position are headers/footers —
-  strip them before assembly. Needs a real multi-page corpus to tune;
-  pointless to fake on a 10-page synthetic.
+- **Handling:** `handled` (Phase 8, case #30) — exactly the repetition
+  analysis the production note called for, tuned on the real corpus it
+  needed: units in the top/bottom page band whose digit-normalized text
+  repeats at the same y on enough pages are stripped before assembly
+  (`assemble.strip_repeated_furniture`).
 
 ---
 
@@ -390,13 +389,85 @@ a rotated scan, and a 31-row schedule vs row-group chunking.
   garbage" failure class this pipeline promises not to have. Found live
   on the complex sample before the fix (quality 0.50).
 - **Handling:** `handled` — two layers. (1) Triage probes every SCANNED
-  page with a cheap low-DPI OCR; below OCR_MIN_QUALITY it retries at
-  90/180/270 and applies the winning rotation in-memory
-  (`set_rotation`), so rendering, YOLO, OCR, and table crops all see
-  the page upright (0.50 → 0.97 on the sample; the fix is recorded in
-  the triage artifact and reapplied on `--from-stage` resume). (2) What
-  still scores below the threshold — stage-5 prose or a tier-2 table —
-  is flagged `needs_review`, propagated through to chunks.
+  page with a cheap low-DPI OCR and, when warranted, applies a rotation
+  in-memory (`set_rotation`), so rendering, YOLO, OCR, and table crops
+  all see the page upright (the fix is recorded in the triage artifact
+  and reapplied on `--from-stage` resume). (2) What still scores below
+  the threshold — stage-5 prose or a tier-2 table — is flagged
+  `needs_review`, propagated through to chunks.
+- **Revised on real data (Phase 8):** the original score-threshold rule
+  was wrong twice on a real corpus. Upright-but-noisy scans score below
+  the full-DPI bar at probe DPI, so every healthy scanned page paid the
+  full 4-rotation search (~8s/page); and a sideways scanned DRAWING got
+  rotated the WRONG way — its text is dimension numbers, and digits
+  carry no chirality (a sideways "6000" reads fine), so the two
+  landscape orientations were a coin flip. Neither signal alone
+  separates the cases (measured: scores 0.57-0.61 in all four
+  orientations on the drawing; word counts highest at the wrong
+  rotation). The rule now uses BOTH: >= 40 real words at the current
+  orientation = upright, exit; a rotation is applied only on a clear
+  score win (>= 0.8, gap >= 0.25) AND >= 15 real words. Number-heavy
+  pages fail the word floor in every orientation and are left alone for
+  the quality gate to flag. Known limit: a 180-degree flip of dense
+  text can read enough junk "words" to take the early exit; Tesseract's
+  real OSD (not exposed by the bundled integration) is the production
+  answer.
+
+---
+
+## Phase 8 — Real-corpus findings
+
+The first three documents of a 10-document real evaluation corpus
+(bilingual procurement-style PDFs, not committed) surfaced two failure
+classes no synthetic sample had predicted. Both are the valuable kind:
+invisible in logs, obvious in output.
+
+### 29. The text layer is present but LYING (broken ToUnicode CMap)
+
+- **Symptom:** bilingual pages whose embedded Indic font renders
+  perfectly but maps glyphs to garbage codepoints — extraction emits
+  `\x01`-riddled mojibake for every Hindi string while English extracts
+  cleanly. ~33% of chunks on affected documents carried mojibake, and
+  nothing flagged them: the quality gate only judged OCR text, and this
+  is "trusted" native text. Endemic in certain government/enterprise
+  PDF toolchains.
+- **Handling:** `handled` — three layers. (1) Triage counts junk chars
+  (C0 controls, U+FFFD, Private Use Area — healthy text layers contain
+  ZERO, measured; broken pages carry 20-451): past either threshold the
+  page reroutes to the OCR path, where Tesseract reads the rendered
+  glyphs the text layer couldn't express. (2) OCR runs multilingual
+  (`OCR_LANGUAGES = "eng+hin"`, per-language tessdata auto-download) —
+  OCRing these pages in English only would re-lose the same text.
+  (3) Mostly-clean pages that stay native get a unit-level net: any
+  unit still containing junk chars is flagged `needs_review`, and a
+  tier-1 table with junk in its cells flags the same way. (4) Rerouted
+  pages are vector-crisp, so page borders sit millimeters from table
+  borders and the pixel grid reads the gap as empty rows/columns —
+  `drop_empty_lines` removes all-empty lines (merges remapped) before
+  validation, restoring the true table shape.
+- **Scoring lesson (found live by a test):** `str.isalpha()` rejects
+  most real Hindi — Indic vowels are COMBINING MARKS (बंद carries
+  U+0902, category Mn), not letters. The quality scorer counts
+  letters-plus-marks as words, or legitimate Devanagari OCR output
+  would have been flagged as garbage by the very gate meant to protect
+  it.
+
+### 30. Page furniture masquerading as tables
+
+- **Symptom:** a bordered page-title box repeats on every page; YOLO
+  calls it a table each time (conf ~0.5 vs ~0.97 for real tables), and
+  find_tables rightly disagrees — so the borderless-suspect cross-check
+  opened 11 needs_review items on one 33-page document, all the same
+  box. Review noise is a real production failure: a drowning reviewer
+  stops reading flags.
+- **Handling:** `handled` — yolo_only suspects recurring at the same
+  position (bbox rounded to 10pt) on >= FURNITURE_MIN_REPEATS distinct
+  pages are page decoration and are suppressed; a suspect appearing
+  once stays a review item. Case #26's unit-level strip removes the
+  same furniture from prose chunks.
+- **Residual risk:** a genuine borderless table repeated at the same
+  position on 3+ pages would be suppressed with the furniture —
+  accepted; such a table is itself boilerplate.
 
 ---
 
