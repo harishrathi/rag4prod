@@ -43,11 +43,15 @@ class UnitType(StrEnum):
 class Source(StrEnum):
     """Which extraction path produced a Unit. Carried through to the final
     chunk so that quality problems can be traced back to their origin
-    ("all the garbled prose has source=tesseract_ocr? then OCR quality is
-    the problem, not the text walk")."""
+    ("all the garbled prose has source=gemini? then the VLM lane is the
+    problem, not the text walk")."""
 
     PYMUPDF = "pymupdf"  # native text layer — exact, free
-    TESSERACT_OCR = "tesseract_ocr"  # scanned pages via bundled Tesseract
+    GEMINI = "gemini"  # paid lane: page image -> VLM transcription
+    # DEPRECATED: no code emits this since the Tesseract stage was replaced
+    # by the VLM lane (docs/gemini_extractor_spec.md). Kept so from_dict can
+    # rehydrate stage artifacts written by older runs.
+    TESSERACT_OCR = "tesseract_ocr"
 
 
 # A bbox is always (x0, y0, x1, y1) in PDF points (72 per inch), in the

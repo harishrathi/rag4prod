@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass
 
 from .config import FURNITURE_BAND_FRAC, FURNITURE_MIN_REPEATS, MAX_HEADING_LEVEL
-from .models import Unit, UnitType
+from .models import Source, Unit, UnitType
 from .tables import TableResult
 
 log = logging.getLogger(__name__)
@@ -97,7 +97,14 @@ class WalkItem:
 
 
 def dedup_units(units: list[Unit], tables: list[TableResult]) -> list[Unit]:
-    """Drop text/title units whose center sits inside any table span."""
+    """Drop text/title units whose center sits inside any table span.
+
+    Paid-lane (GEMINI) units are exempt: their bboxes are the full page
+    (page-level provenance), so their centers land wherever the page
+    center is — center containment would mass-drop a page's prose the
+    moment any table span covers midpage. They also don't need dedup:
+    the VLM emits prose and tables disjointly, never the same content
+    twice."""
     spans: dict[int, list[tuple[float, float, float, float]]] = {}
     for t in tables:
         for page, bbox in t.page_spans:
@@ -106,7 +113,11 @@ def dedup_units(units: list[Unit], tables: list[TableResult]) -> list[Unit]:
     kept: list[Unit] = []
     dropped = 0
     for u in units:
-        if u.type in (UnitType.TEXT, UnitType.TITLE) and u.page in spans:
+        if (
+            u.type in (UnitType.TEXT, UnitType.TITLE)
+            and u.source != Source.GEMINI
+            and u.page in spans
+        ):
             cx = (u.bbox[0] + u.bbox[2]) / 2
             cy = (u.bbox[1] + u.bbox[3]) / 2
             if any(x0 <= cx <= x1 and y0 <= cy <= y1 for x0, y0, x1, y1 in spans[u.page]):
@@ -138,7 +149,12 @@ def assign_heading_levels(units: list[Unit]) -> dict[int, int]:
         if u.type != UnitType.TITLE:
             continue
         m = _NUMBERED.match(u.content)
-        if m:
+        if u.level is not None:
+            # Paid-lane titles carry an explicit level (the VLM saw the
+            # visual hierarchy directly) and no font size — the size
+            # clustering below has nothing to measure for them (§5.3).
+            level = u.level
+        elif m:
             level = m.group(1).count(".") + 1
         elif u.font_size:
             level = rank.get((u.source.value, round(u.font_size)), 1)

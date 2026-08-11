@@ -23,7 +23,7 @@ re-rendering; ``--from-stage 4`` is clamped to 3):
     1  triage      stages/01_triage.json     # kind + evidence + rotation fixes
     2  extract     stages/02_units_local.jsonl + 02_ruled_grids.json
     3+4 render+layout  stages/03_render.json + 04_layout.jsonl
-    5  ocr         stages/05_ocr_units.jsonl
+    5  vlm         stages/05_vlm.jsonl + 05_vlm_pages.json (+ cache/vlm/)
     6  tables      stages/06_tables.jsonl
     7  assemble    stages/07_chunks.jsonl + merged.md   (always runs)
 
@@ -60,8 +60,8 @@ from pathlib import Path
 
 import pymupdf
 
-from . import assemble, chunking, local_extract, ocr, render, tables
-from .config import FIGURE_DPI, RENDER_DPI
+from . import assemble, chunking, local_extract, render, tables, vlm_extract
+from .config import FIGURE_DPI, MIN_TEXT_CHARS, RENDER_DPI, SCAN_IMAGE_COVERAGE
 from .layout import LayoutDetector, Region
 from .local_extract import RuledGrid
 from .models import PageKind, Source, Unit, UnitType
@@ -303,30 +303,56 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
             regions = [Region.from_dict(d) for d in _read_stage_jsonl(doc_out, "04_layout.jsonl")]
             log.info("stages 3+4 skipped, loaded %d regions from artifact", len(regions))
 
-        # ---- STAGE 5: OCR scanned prose + store scanned figure crops ---
-        # Scanned pages flow through the SAME extraction walk as native
-        # pages (see local_extract.extract_page's textpage seam); figure
-        # regions YOLO found on scanned pages become stored PNG crops —
-        # cropped via the converted bbox_pdf, i.e. the stage-4 coordinate
-        # helper is what makes these crops land on the right pixels.
+        # ---- STAGE 5: VLM extraction (paid lane) + scanned figure crops
+        # Every SCANNED page — true scans AND lying-CMap reroutes — is
+        # re-read from pixels by the VLM (vlm_extract.py). The render
+        # reuses the stage-3 config (RENDER_DPI), responses are cached
+        # under cache/vlm/ so re-runs are free, and YOLO's table regions
+        # feed both the bbox assignment and the omission cross-check.
+        # Figure regions YOLO found on scanned pages become stored PNG
+        # crops, exactly as before.
         if from_stage <= 5:
             t0 = time.perf_counter()
-            ocr_units: list[Unit] = []
-            for r in records:
-                if r.kind != PageKind.SCANNED:
-                    continue
+            vlm_units: list[Unit] = []
+            vlm_pages: list[vlm_extract.VlmPageRecord] = []
+            scanned = [r for r in records if r.kind == PageKind.SCANNED]
+            client = vlm_extract.CachedVlmClient(
+                vlm_extract.GeminiClient(), doc_out / "cache" / "vlm"
+            )
+            for r in scanned:
                 page = doc.load_page(r.page)
-                ocr_units.extend(ocr.ocr_page_units(page, r.page, doc_out / "figures"))
+                png = render.render_page(page).tobytes("png")
+                yolo_tables = [
+                    g.bbox_pdf for g in regions if g.page == r.page and g.label == "table"
+                ]
+                # A page rerouted for a lying-but-countable text layer
+                # keeps its char count as verification evidence (the
+                # conditions mirror triage's reroute guards); true scans
+                # rely on the ink-coverage proxy instead.
+                rerouted = (
+                    r.text_chars >= MIN_TEXT_CHARS
+                    and r.max_image_coverage <= SCAN_IMAGE_COVERAGE
+                )
+                page_units, rec = vlm_extract.vlm_page_units(
+                    png,
+                    r.page,
+                    (page.rect.x0, page.rect.y0, page.rect.x1, page.rect.y1),
+                    yolo_tables,
+                    client,
+                    text_layer_chars=r.text_chars if rerouted else None,
+                )
+                vlm_units.extend(page_units)
+                vlm_pages.append(rec)
             for g in regions:
                 if g.label != "figure" or page_kinds.get(g.page) != PageKind.SCANNED:
                     continue
-                key = f"figures/p{g.page:04d}_r{len(ocr_units):02d}.png"
+                key = f"figures/p{g.page:04d}_r{len(vlm_units):02d}.png"
                 pix = doc.load_page(g.page).get_pixmap(
                     clip=pymupdf.Rect(g.bbox_pdf), dpi=FIGURE_DPI
                 )
                 (doc_out / key).parent.mkdir(parents=True, exist_ok=True)
                 (doc_out / key).write_bytes(pix.tobytes("png"))
-                ocr_units.append(
+                vlm_units.append(
                     Unit(
                         page=g.page,
                         bbox=g.bbox_pdf,
@@ -335,13 +361,26 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
                         source=Source.PYMUPDF,
                     )
                 )
-            timings["ocr"] = round(time.perf_counter() - t0, 3)
-            _write_stage_jsonl(doc_out, "05_ocr_units.jsonl", [u.to_dict() for u in ocr_units])
+            timings["vlm"] = round(time.perf_counter() - t0, 3)
+            _write_stage_jsonl(doc_out, "05_vlm.jsonl", [u.to_dict() for u in vlm_units])
+            _write_stage(
+                doc_out,
+                "05_vlm_pages.json",
+                {"model": client.model_id, "pages": [p.to_dict() for p in vlm_pages]},
+            )
+            # Cost accounting: tokens, not currency — prices change.
+            fresh = [p for p in vlm_pages if not p.cached]
+            log.info(
+                "vlm: %d page(s), %d cached, %d API call(s); tokens in=%d out=%d",
+                len(vlm_pages),
+                len(vlm_pages) - len(fresh),
+                len(fresh),
+                sum(p.input_tokens for p in fresh),
+                sum(p.output_tokens for p in fresh),
+            )
         else:
-            ocr_units = [
-                Unit.from_dict(d) for d in _read_stage_jsonl(doc_out, "05_ocr_units.jsonl")
-            ]
-            log.info("stage 5 skipped, loaded %d units from artifact", len(ocr_units))
+            vlm_units = [Unit.from_dict(d) for d in _read_stage_jsonl(doc_out, "05_vlm.jsonl")]
+            log.info("stage 5 skipped, loaded %d units from artifact", len(vlm_units))
 
         page_heights = {r.page: doc.load_page(r.page).rect.height for r in records}
 
@@ -355,14 +394,19 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
             for r in records:
                 if r.kind == PageKind.TEXT_NATIVE:
                     raw_tables.extend(tables.extract_native_tables(doc.load_page(r.page), r.page))
-            # Tier 2: scanned-page YOLO table regions -> pixel grid, line
-            # removal, then a dedicated OCR pass on the cleaned crop (the
-            # stage-5 full-page OCR is unusable here: Tesseract drops text
-            # inside ruled cells — see tables.extract_scanned_table).
-            for g in regions:
-                if g.label == "table" and page_kinds.get(g.page) == PageKind.SCANNED:
+            # Paid lane: Gemini returned scanned-page tables inline as GFM
+            # markdown. Parse them to cells and feed the SAME validation /
+            # stitching path as every other source — stitching is format
+            # logic, not extraction logic.
+            for u in vlm_units:
+                if u.type == UnitType.TABLE:
                     raw_tables.append(
-                        tables.extract_scanned_table(doc.load_page(g.page), g.page, g.bbox_pdf)
+                        tables.RawTable(
+                            page=u.page,
+                            bbox=u.bbox,
+                            cells=vlm_extract.markdown_table_cells(u.content),
+                            source="gemini",
+                        )
                     )
             # Cross-check: a YOLO table on a NATIVE page that find_tables did
             # not see is a borderless-table suspect -> review item, not a miss.
@@ -391,7 +435,11 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
         # against table regions, walked in reading order, chunked per
         # heading section. This is where 0-based pages become 1-based.
         t0 = time.perf_counter()
-        all_units = units + ocr_units + drawing_units
+        # Gemini TABLE units entered stage 6 as RawTables — excluding them
+        # here is what keeps each table a single TableResult in the walk.
+        all_units = (
+            units + [u for u in vlm_units if u.type != UnitType.TABLE] + drawing_units
+        )
         walk = assemble.build_walk(all_units, table_results, page_heights)
         chunks, merged_md = chunking.chunk_document(doc_id, walk)
         timings["assemble"] = round(time.perf_counter() - t0, 3)
@@ -403,7 +451,7 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
         for r in records:
             counts[r.kind.value] = counts.get(r.kind.value, 0) + 1
         unit_counts: dict[str, int] = {}
-        for u in units + ocr_units:
+        for u in units + vlm_units:
             unit_counts[u.type.value] = unit_counts.get(u.type.value, 0) + 1
 
         manifest = {

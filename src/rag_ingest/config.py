@@ -58,6 +58,21 @@ DRAWING_MIN_SEGMENTS = 100
 TEXT_LAYER_JUNK_MIN = 20  # absolute junk chars per page
 TEXT_LAYER_JUNK_RATIO = 0.005  # junk chars / non-whitespace chars
 
+# Printable mojibake (gemini_extractor_spec.md §3): the OTHER broken-CMap
+# symptom — glyphs mapping to printable garbage (orphan combining marks,
+# ASCII symbols inside non-Latin words), which the junk-char test cannot
+# see. Pages crossing either bound reroute to the VLM lane.
+# Measured on the real corpus (640 native-eligible pages, 2026-08-11):
+# healthy pages score EXACTLY 0 (629/640); broken-CMap pages score 10-20
+# (GeM bilingual pages: orphan matras + `म=`/`स]म` interleave; IREPS
+# booklet cover: visual-order matras — a break the junk test missed).
+# The 1-7 band is empty, so 8 sits below every observed broken page and
+# above every healthy one. The ratio bound is for short broken pages a
+# small absolute count would miss; healthy pages are all 0, so any
+# positive ratio is safe there.
+MOJIBAKE_MIN = 8  # absolute mojibake chars per page
+MOJIBAKE_RATIO = 0.01  # mojibake chars / non-whitespace chars
+
 # ---------------------------------------------------------------------------
 # Debug artifacts (all stages)
 # ---------------------------------------------------------------------------
@@ -150,7 +165,55 @@ YOLO_BOX_PAD_PX = 10
 YOLO_DEVICE = "cpu"
 
 # ---------------------------------------------------------------------------
-# STAGE 5 — OCR (rag_ingest/ocr.py)
+# STAGE 5 — VLM extraction (rag_ingest/vlm_extract.py)
+# ---------------------------------------------------------------------------
+
+# Engine model id. Verified against ai.google.dev on 2026-08-11:
+# gemini-3.6-flash is the current recommended stable Flash model (the
+# spec's "gemini-3-flash" exists only as a preview id). Flash tier on
+# purpose — benchmarks show no OCR gain from Pro at ~10x the cost.
+# Engines are perishable; when this id retires, swap it here and the
+# response cache re-keys automatically.
+VLM_MODEL = "gemini-3.6-flash"
+
+# Retries on 429/5xx/network errors: exponential backoff with jitter.
+# A page exhausting retries becomes one empty needs_review unit — pages
+# never silently vanish.
+VLM_MAX_RETRIES = 4
+
+# Verification (vlm_extract.verify_page_markdown). VLMs fail as fluent
+# lies, not symbol soup — so the checks look for repetition loops,
+# implausible lengths, and silent omission rather than junk tokens.
+#
+# Repetition: a normalized 20-char sequence recurring more than this many
+# times is a runaway loop (the documented failure mode emits up to 71x
+# the reference length), not natural prose. 10 tolerates boilerplate-
+# heavy legal pages while catching real loops, which recur hundreds of
+# times.
+VLM_MAX_REPEATS = 10
+
+# Length sanity for rerouted lying-CMap pages: the garbled text layer
+# still COUNTS characters correctly, so output far shorter (omission) or
+# far longer (loop/hallucination) than the layer is suspect. Wide bounds
+# on purpose: markdown adds table/heading syntax, and Devanagari-vs-
+# mojibake char counts differ legitimately.
+VLM_LEN_LO = 0.3
+VLM_LEN_HI = 3.0
+
+# Length sanity for true scans (no text layer to count): a render whose
+# ink coverage says "dense page" but whose response is near-empty is a
+# silent-omission suspect. Ink coverage reuses GRID_DARK_THRESHOLD.
+# Measured on the real corpus at RENDER_DPI (2026-08-11): a truly blank
+# scanned page = 0.0000; the LIGHTEST content-bearing page = 0.0196
+# (645 chars); typical text scans 0.02-0.07. 0.015 sits between blank
+# and lightest-content. One outlier: a dark-background cover page hit
+# 0.58 with ~214 chars — such pages may flag spuriously, which errs the
+# right way (a review flag, not silent garbage).
+VLM_DENSE_INK_FRAC = 0.015
+VLM_MIN_CHARS_DENSE = 200
+
+# ---------------------------------------------------------------------------
+# STAGE 5 (LEGACY) — OCR (rag_ingest/ocr.py)
 # ---------------------------------------------------------------------------
 
 # PyMuPDF wheels BUNDLE libtesseract — no system install, no Docker. The

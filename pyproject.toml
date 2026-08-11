@@ -16,6 +16,7 @@ dependencies = [
     "huggingface-hub==1.27.0", # Phase 3: model weights download + cache
     "numpy==2.5.2",            # Phase 3: pixmap -> model input arrays
     "chonkie==1.7.0",          # Phase 6: sentence chunking with real token sizing
+    "google-genai==2.17.0",    # VLM lane: Gemini client (gemini_extractor_spec.md)
 ]
 
 [project.optional-dependencies]

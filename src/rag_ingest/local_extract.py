@@ -49,7 +49,7 @@ from .config import (
     RULED_MIN_V_SEGMENTS,
 )
 from .models import BBox, PageKind, Source, Unit, UnitType
-from .triage import JUNK_CHARS_RE
+from .triage import JUNK_CHARS_RE, orphan_combining_marks
 
 log = logging.getLogger(__name__)
 
@@ -210,12 +210,16 @@ def extract_page(
                         type=UnitType.TEXT,
                         content=content,
                         source=source,
-                        # Safety net under triage's page-level CMap guard
-                        # (ledger #29): a page mostly-clean enough to stay
-                        # native can still carry a few mojibake units —
-                        # flag them, never ship them silently.
+                        # Safety net under triage's page-level CMap guards
+                        # (ledger #29 + gemini_extractor_spec.md §3): a page
+                        # mostly-clean enough to stay native can still carry
+                        # a few mojibake units — flag them, never ship them
+                        # silently.
                         needs_review=source == Source.PYMUPDF
-                        and JUNK_CHARS_RE.search(content) is not None,
+                        and (
+                            JUNK_CHARS_RE.search(content) is not None
+                            or orphan_combining_marks(content) > 0
+                        ),
                     )
                 )
             para_lines, para_bbox = [], None

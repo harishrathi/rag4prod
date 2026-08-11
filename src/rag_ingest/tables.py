@@ -71,7 +71,7 @@ class RawTable:
     page: int
     bbox: BBox
     cells: list[list[str]]  # [] when a region was detected but not parsed
-    source: str  # "find_tables" | "grid_ocr" | "yolo_only"
+    source: str  # "find_tables" | "gemini" | "yolo_only"
     header_rows: int = 1
     merges: list[list[int]] = field(default_factory=list)  # [row, col, rowspan, colspan]
 
@@ -521,6 +521,15 @@ def _norm_row(row: list[str]) -> str:
     return " ".join(" ".join(row).lower().split())
 
 
+def _full_page_bbox(t: RawTable, page_heights: dict[int, float]) -> bool:
+    """Paid-lane tables that YOLO could not box carry the full-page rect
+    (page-level provenance). Such a bbox says nothing about where the
+    table actually sits, so the geometry tests below would vacuously
+    pass — real tables never start at literal y=0."""
+    h = page_heights.get(t.page, 842.0)
+    return t.bbox[1] <= 1.0 and t.bbox[3] >= h - 1.0
+
+
 def _is_continuation(prev: RawTable, nxt: RawTable, page_heights: dict[int, float]) -> bool:
     if nxt.page != prev.page + 1:
         return False
@@ -528,6 +537,8 @@ def _is_continuation(prev: RawTable, nxt: RawTable, page_heights: dict[int, floa
         return False
     if len(prev.cells[0]) != len(nxt.cells[0]):
         return False  # column mismatch: refuse — never guess at structure
+    if _full_page_bbox(prev, page_heights) or _full_page_bbox(nxt, page_heights):
+        return False  # no real geometry to test: refuse rather than guess
     prev_h = page_heights.get(prev.page, 842.0)
     next_h = page_heights.get(nxt.page, 842.0)
     exits_bottom = prev.bbox[3] >= prev_h * TABLE_CONT_BOTTOM_FRAC

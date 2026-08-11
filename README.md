@@ -12,6 +12,9 @@ extraction, rendering, bundled Tesseract OCR) + DocLayout-YOLO (layout
 detection) — **fully local, no API keys**. Full architecture and the
 reasoning behind every design decision, including why the original
 vision-LLM tier was dropped: [docs/design_spec.md](docs/design_spec.md).
+What a clean-room v2 would look like now that all 30 edge cases are known —
+the patches distilled back into an architecture:
+[docs/rewrite_design.md](docs/rewrite_design.md).
 
 ## Pipeline
 
