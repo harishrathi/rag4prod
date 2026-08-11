@@ -1,4 +1,5 @@
 .venv/
+.env
 output/
 .tessdata/
 __pycache__/

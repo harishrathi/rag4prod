@@ -1,9 +1,15 @@
 # Rewrite design — v2 architecture from the lessons of v1
 
-**Status:** proposal. Nothing here is implemented; the current pipeline
-(`src/rag_ingest/`, [design_spec.md](design_spec.md)) is complete and
-working. This document answers a different question: *knowing everything
-the [edge-case ledger](edge_cases.md) now records, what would the
+**Status:** approved for implementation, revised 2026-08-11 for the
+post-Gemini world: v1's stage 5 is now the VLM lane
+([gemini_extractor_spec.md](gemini_extractor_spec.md)) and the Tesseract
+OCR engine, its orientation probe, and the tier-2 pixel-grid table path
+are gone from the design. Sections below that described Tesseract-era
+mechanics have been updated in place; the historical themes in §1 are
+left as v1 history — they are the evidence, not the target.
+
+This document answers the question: *knowing everything the
+[edge-case ledger](edge_cases.md) now records, what would the
 architecture be if designed from that knowledge on day 1?*
 
 The premise matters. v1's fixes landed as patches because the edge cases
@@ -121,11 +127,16 @@ class PageProfile:
     page: int
     text_chars: int
     junk_chars: int              # C0 / U+FFFD / PUA count (#29)
+    mojibake_chars: int          # orphan marks + interleaved symbols (VLM spec §3)
     max_image_coverage: float    # (#1)
     text_bbox_area_frac: float   # (#1 production note — now free to include)
     vector_segments: int         # deduped (#7), (#2)
-    orientation_probe: OrientationProbe | None   # low-DPI OCR evidence (#28)
 ```
+
+(The v1 orientation probe is gone with its engine: the VLM reads rotated
+pages, so orientation is no longer profiled. If corpus evidence later
+disagrees, the profile grows a cheap render-time field — a new field
+breaks nothing.)
 
 The critical property: **profiling decides nothing.** v1's triage both
 measured and decided, which is why every new signal (junk chars,
@@ -143,24 +154,20 @@ def route(profile: PageProfile) -> PageRoute
 
 @dataclass(frozen=True)
 class PageRoute:
-    extractor: Extractor         # NATIVE | OCR | DRAWING
-    rotation: int                # 0 | 90 | 180 | 270  (#28)
-    languages: str               # e.g. "eng+hin"      (#29)
+    extractor: Extractor         # NATIVE | VLM | DRAWING
     reasons: list[str]           # every rule that fired, for the artifact
 ```
 
 All threshold logic from thirty ledger cases lives in this one
 table-driven, trivially testable module: the image-coverage override
 (#1), the drawing rule (#2), the near-blank bias (#3), the junk-char
-reroute (#29), the rotation decision with its word-floor and score-gap
-guards (#28). Three patches in three files become three rules in one
-file, each unit-tested against a recorded profile.
+and mojibake reroutes (#29 + VLM spec §3). Three patches in three files
+become three rules in one file, each unit-tested against a recorded
+profile.
 
-**Rotation becomes data in the route**, applied by whoever opens the
-page. The v1 resume hack — re-applying `set_rotation` from the triage
-artifact on every reopen — is deleted, not fixed: a route is immutable
-data, so *every* consumer (render, OCR, table crops, a resumed run)
-applies it identically by construction.
+(v1's rotation/languages route fields died with the OCR engine: the VLM
+needs neither, which also deletes the resume hack that re-applied
+`set_rotation` on every reopen.)
 
 ### Layer 3 — Extraction workers: per-page, process-parallel
 
@@ -170,8 +177,10 @@ Each worker takes `(pdf_path, page_number, route)` — a path, not a live
 Three workers, one per extractor route:
 
 - **native**: the v1 stage-2 line walk (#6, #17), unchanged in logic
-- **ocr**: render → Tesseract textpage → the *same* line walk (the
-  textpage seam that already worked in v1)
+- **vlm**: render → VLM markdown → the deterministic parser
+  (`vlm_extract.py`'s seam, reused as-is — it was built post-ledger and
+  carries no scar tissue); the worker records the page's verification
+  evidence (VlmPageRecord) for Layer 6 to judge
 - **drawing**: render to PNG, store as figure (#2)
 
 YOLO layout detection runs inside the worker on the same pixmap the
@@ -183,8 +192,11 @@ Because workers share nothing, this layer runs under
 `ProcessPoolExecutor` with page-range sharding — resolving #4
 architecturally instead of by "triage is deliberately single-threaded."
 The model load cost is amortized by loading YOLO once per worker
-process, not per page. Sequential execution remains a `--workers 1`
-flag, and determinism is preserved because workers emit keyed-by-page
+process, not per page; the VLM response cache is shared across workers
+(one file per page, hash-keyed, no coordination needed). Sequential
+execution remains a `--workers 1` flag — and stays the default: the
+paid lane is API-bound, and small documents don't repay process spawn
+costs. Determinism is preserved because workers emit keyed-by-page
 results that the orchestrator reassembles in page order.
 
 ### Layer 4 — The table ladder, split into its real parts
@@ -194,18 +206,21 @@ seams the patches revealed:
 
 ```text
 tables/
-    grids.py        vector-line grids (#7) + pixel-line grids, ink checks (#27)
+    grids.py        vector-line grid evidence (#7) — cross-check, never a router
     cells_native.py find_tables + span geometry -> unmerged cell grid (#27)
-    cells_ocr.py    selective line-erasure (#19, #27) + word re-anchoring (#20)
-    validate.py     structural checks; junk-char cell checks (#29); empty-line drop
+    cells_vlm.py    GFM markdown -> unmerged cell grid (paid-lane pages)
+    validate.py     structural checks; junk-char cell checks (#29); renderings
     stitch.py       cross-page continuation, equal-column rule (#21), span fill (#27)
 ```
 
+(v1's tier-2 — pixel-grid detection, selective line-erasure, OCR word
+re-anchoring — died with its engine: paid-lane pages come back with
+tables already inline as markdown.)
+
 The tier ladder becomes an explicit ordered list of extractors, each
 behind a validation gate; failing the last gate yields `needs_review`
-plus a stored crop. That makes #18's observation structural: the VLM
-tier-3 slot is literally an empty list entry, and plugging one in later
-touches the list, not the ladder.
+plus a stored crop. That makes #18's observation structural: adding a
+future extractor touches the list, not the ladder.
 
 The **unmerged-cell contract** (#27 — merged values repeated into every
 covered position, printed layout preserved in `merges`) is kept exactly:
@@ -234,11 +249,16 @@ sprinkling it:
 
 ```python
 VALIDATORS = {
-    Source.TESSERACT_OCR: ocr_quality_score,        # (#16, #28) — counts marks (#29)
-    Source.PYMUPDF:       junk_char_check,          # (#29)
-    UnitType.TABLE:       structural_validation,    # (#21, #27)
+    Source.GEMINI:  vlm_page_checks,        # repetition / length / echo / omission
+    Source.PYMUPDF: junk_char_check,        # junk + orphan marks (#29, VLM spec §3)
+    UnitType.TABLE: structural_validation,  # (#21, #27)
 }
 ```
+
+The paid-lane validators consume the VlmPageRecord evidence the worker
+recorded (VLMs fail as fluent lies — repetition loops, silent omission —
+so their checks are plausibility checks, not symbol-soup checks); the
+`[ILLEGIBLE]` token flags only its own unit.
 
 Every flag records *which validator fired and why* — v1's flags are
 bare booleans, and #30 proved that reviewer experience is itself a
@@ -329,6 +349,13 @@ converges on them rather than reinventing them:
 - **`Unit` and `Chunk` contracts** ([models.py](../src/rag_ingest/models.py)),
   including the 0-based-internal / 1-based-citation page rule with its
   single conversion point
+- **the whole VLM seam** ([vlm_extract.py](../src/rag_ingest/vlm_extract.py))
+  and the **text-signal functions**
+  ([text_quality.py](../src/rag_ingest/text_quality.py)): client protocol,
+  response cache, markdown parser, verification checks, junk/mojibake
+  scoring. Like models.py they are shared, not copied — all were designed
+  after the ledger was complete and carry no scar tissue, which is the
+  only reason the "share no code" rule below has exactly these exceptions
 - **artifact-per-layer JSONL** checkpoints and the manifest
 - **the edge-case ledger discipline** — v2 gets its own ledger from day 1
 - **the tiered-cost rule** — never run an expensive extractor on content
@@ -345,6 +372,10 @@ The rewrite is validated by *diffing against v1*, not by re-reasoning:
 1. **Golden baseline first.** Run v1 on the full evaluation corpus (the
    two synthetic samples plus the real 10-document set) and freeze its
    `07_chunks.jsonl`, `06_tables.jsonl`, and manifests as golden files.
+   This is the run that needs GEMINI_API_KEY; both pipelines key the
+   response cache identically (SHA-256 of PNG + model + prompt version),
+   so pointing v2 at the same cache directory makes the v2 comparison
+   runs free — one paid pass covers the whole migration.
 2. **Port the content-asserting tests** before writing v2 code. The
    existing tests assert on expected content, not on "no crash" (#22's
    lesson), so they transfer almost directly to the new module
@@ -361,8 +392,8 @@ The rewrite is validated by *diffing against v1*, not by re-reasoning:
    own before/after diff.
 5. **Cut over per-corpus, keep v1 runnable** until the diff on the real
    corpus is empty-or-explained. The two pipelines share no code except
-   `models.py`, so they can coexist as `rag_ingest/` and `rag_ingest2/`
-   (or a branch) during the overlap.
+   `models.py` and `vlm_extract.py` (see §4), so they can coexist as
+   `rag_ingest/` and `rag_ingest2/` during the overlap.
 
 This turns the rewrite from a leap into a refactor with a safety net:
 the internals are new, but every output is checked against a pipeline
@@ -372,11 +403,11 @@ that thirty documented edge cases already hardened.
 
 ## 6. Honest limits of the rewrite
 
-- **It does not add capability.** Borderless tables still route to
-  review (#18), Tesseract still lacks per-word confidence through the
-  bundled integration (#16), and true orientation detection still wants
-  real OSD (#28). The rewrite changes where the *next* fix lands, not
-  what the pipeline can extract today.
+- **It does not add capability.** Borderless tables on NATIVE pages
+  still route to review (#18), and the paid lane still has page-level
+  provenance for prose (the accepted trade of VLM spec §4.3). The
+  rewrite changes where the *next* fix lands, not what the pipeline can
+  extract today.
 - **Process-parallelism adds real complexity** (worker lifecycle, model
   loads per process, result reassembly). It is justified by render+OCR
   wall-clock on 3000-page documents; for small documents `--workers 1`

@@ -59,7 +59,7 @@ from .config import (
     VLM_MODEL,
 )
 from .models import BBox, Source, Unit, UnitType
-from .triage import JUNK_CHARS_RE, orphan_combining_marks
+from .text_quality import JUNK_CHARS_RE, orphan_combining_marks
 
 log = logging.getLogger(__name__)
 
@@ -120,14 +120,31 @@ class VlmClient(Protocol):
     def generate(self, png: bytes, prompt: str) -> VlmResponse: ...
 
 
+def _load_dotenv_key() -> None:
+    """Fallback: read GEMINI_API_KEY from a ``.env`` file in the working
+    directory (KEY=value lines, # comments). Deliberately minimal — one
+    key, no dependency — and .env is gitignored: this is a public repo,
+    the key must never be committable, and it is never written to config
+    or artifacts."""
+    env_file = Path(".env")
+    if not env_file.exists():
+        return
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("GEMINI_API_KEY="):
+            os.environ["GEMINI_API_KEY"] = line.split("=", 1)[1].strip().strip("\"'")
+            return
+
+
 class GeminiClient:
     """Gemini via the google-genai SDK (the current one — ``from google
     import genai`` — NOT the deprecated google-generativeai).
 
-    Auth is the GEMINI_API_KEY env var, read lazily on first call so a
-    fully cached run never needs it. Never written to config or
-    artifacts. Retries: exponential backoff with full jitter on
-    429/5xx/network errors, VLM_MAX_RETRIES attempts after the first.
+    Auth is the GEMINI_API_KEY env var (or a gitignored ``.env`` file),
+    read lazily on first call so a fully cached run never needs it.
+    Never written to config or artifacts. Retries: exponential backoff
+    with full jitter on 429/5xx/network errors, VLM_MAX_RETRIES attempts
+    after the first.
     """
 
     def __init__(self, model: str = VLM_MODEL) -> None:
@@ -137,8 +154,11 @@ class GeminiClient:
     def _load(self):
         if self._client is None:
             if not os.environ.get("GEMINI_API_KEY"):
+                _load_dotenv_key()
+            if not os.environ.get("GEMINI_API_KEY"):
                 raise VlmError(
-                    "GEMINI_API_KEY is not set — the paid lane needs it for uncached pages"
+                    "GEMINI_API_KEY is not set (env var or .env file) — "
+                    "the paid lane needs it for uncached pages"
                 )
             from google import genai  # deferred: keep import cost off free-lane runs
 

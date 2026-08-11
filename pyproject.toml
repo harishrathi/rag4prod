@@ -27,6 +27,7 @@ dev = [
 
 [project.scripts]
 rag-ingest = "rag_ingest.pipeline:main"
+rag-ingest2 = "rag_ingest2.pipeline:main"
 
 # src layout: the package importable as `rag_ingest` lives in src/.
 # Standard practice for public packages — it guarantees tests run against

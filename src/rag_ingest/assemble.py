@@ -56,7 +56,10 @@ def strip_repeated_furniture(units: list[Unit], page_heights: dict[int, float]) 
     """
     candidates: dict[tuple[int, str], set[int]] = {}
     for u in units:
-        if u.type not in (UnitType.TEXT, UnitType.TITLE):
+        if u.type not in (UnitType.TEXT, UnitType.TITLE) or not u.content.strip():
+            # Empty units never match as furniture: a failed paid-lane
+            # page leaves one empty flagged placeholder per page, and
+            # "same emptiness on N pages" must not delete the pages.
             continue
         h = page_heights.get(u.page, 842.0)
         if u.bbox[1] <= h * FURNITURE_BAND_FRAC or u.bbox[3] >= h * (1 - FURNITURE_BAND_FRAC):
@@ -71,6 +74,7 @@ def strip_repeated_furniture(units: list[Unit], page_heights: dict[int, float]) 
     for u in units:
         if (
             u.type in (UnitType.TEXT, UnitType.TITLE)
+            and u.content.strip()
             and (round(u.bbox[1] / 8), _furniture_norm(u.content)) in furniture
         ):
             dropped += 1
