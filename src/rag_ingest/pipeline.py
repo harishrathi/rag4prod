@@ -32,8 +32,9 @@ pipeline change):
         stages/02_ruled_grids.json    # body font size + table-grid evidence
         stages/03_render.json         # per-page render metadata + drawing keys
         stages/04_layout.jsonl        # YOLO regions, px AND pdf boxes
-        stages/05_gemini.jsonl                                   [Phase 4]
-        stages/06_chunks.jsonl                                   [Phase 5]
+        stages/05_ocr_units.jsonl     # scanned-page units via Tesseract
+        stages/06_tables.jsonl                                   [Phase 5]
+        stages/07_chunks.jsonl                                   [Phase 6]
         debug/renders/            # downscaled page JPEGs (what YOLO saw)
         figures/                  # full-quality stored PNGs
         merged.md                                                [Phase 5]
@@ -50,10 +51,10 @@ from pathlib import Path
 
 import pymupdf
 
-from . import local_extract, render
-from .config import RENDER_DPI
+from . import local_extract, ocr, render
+from .config import FIGURE_DPI, RENDER_DPI
 from .layout import LayoutDetector
-from .models import PageKind
+from .models import PageKind, Source, Unit, UnitType
 from .triage import TriageRecord, triage
 
 log = logging.getLogger(__name__)
@@ -187,11 +188,42 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
             len({g.page for g in regions}),
         )
 
+        # ---- STAGE 5: OCR scanned prose + store scanned figure crops ---
+        # Scanned pages flow through the SAME extraction walk as native
+        # pages (see local_extract.extract_page's textpage seam); figure
+        # regions YOLO found on scanned pages become stored PNG crops —
+        # cropped via the converted bbox_pdf, i.e. the stage-4 coordinate
+        # helper is what makes these crops land on the right pixels.
+        t0 = time.perf_counter()
+        ocr_units: list[Unit] = []
+        for r in records:
+            if r.kind != PageKind.SCANNED:
+                continue
+            ocr_units.extend(ocr.ocr_page_units(doc.load_page(r.page), r.page, doc_out / "figures"))
+        for g in regions:
+            if g.label != "figure" or page_kinds.get(g.page) != PageKind.SCANNED:
+                continue
+            key = f"figures/p{g.page:04d}_r{len(ocr_units):02d}.png"
+            pix = doc.load_page(g.page).get_pixmap(clip=pymupdf.Rect(g.bbox_pdf), dpi=FIGURE_DPI)
+            (doc_out / key).parent.mkdir(parents=True, exist_ok=True)
+            (doc_out / key).write_bytes(pix.tobytes("png"))
+            ocr_units.append(
+                Unit(
+                    page=g.page,
+                    bbox=g.bbox_pdf,
+                    type=UnitType.FIGURE,
+                    storage_key=key,
+                    source=Source.PYMUPDF,
+                )
+            )
+        timings["ocr"] = round(time.perf_counter() - t0, 3)
+        _write_stage_jsonl(doc_out, "05_ocr_units.jsonl", [u.to_dict() for u in ocr_units])
+
         counts: dict[str, int] = {}
         for r in records:
             counts[r.kind.value] = counts.get(r.kind.value, 0) + 1
         unit_counts: dict[str, int] = {}
-        for u in units:
+        for u in units + ocr_units:
             unit_counts[u.type.value] = unit_counts.get(u.type.value, 0) + 1
 
         manifest = {

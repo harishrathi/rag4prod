@@ -134,3 +134,19 @@ YOLO_BOX_PAD_PX = 10
 
 # "cpu" is fine at our page counts; set "cuda" / "mps" when available.
 YOLO_DEVICE = "cpu"
+
+# ---------------------------------------------------------------------------
+# STAGE 5 — OCR (rag_ingest/ocr.py)
+# ---------------------------------------------------------------------------
+
+# PyMuPDF wheels BUNDLE libtesseract — no system install, no Docker. The
+# only external artifact is the language data file, auto-downloaded here.
+# tessdata_fast trades a little accuracy for 4x smaller files and faster
+# inference; clean machine-typeset print (our corpus) barely notices.
+# Swap in the 'tessdata_best' URL if OCR quality ever disappoints.
+TESSDATA_DIR = ".tessdata"
+TESSDATA_URL = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata"
+
+# OCR render resolution. 300 DPI is Tesseract's canonical sweet spot:
+# below ~250 accuracy drops off; above ~350 costs time for no gain.
+OCR_DPI = 300

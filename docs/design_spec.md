@@ -2,16 +2,20 @@
 
 **Input:** large mixed-content PDFs — text-native pages, scanned pages, and
 vector-drawing pages in one document (contracts, technical manuals, scanned
-archives).
+business documents).
 **Output:** retrieval-ready chunks that carry page numbers and bounding
 boxes, so every answer can cite its source location.
-**Stack:** PyMuPDF (local) + DocLayout-YOLO (local) + Gemini (vision API).
-**Targets:** 3000-page PDF end-to-end in < 20 minutes; table accuracy is
-prioritized over API cost.
+**Stack:** PyMuPDF + DocLayout-YOLO + Tesseract (bundled in PyMuPDF) —
+**fully local, no API dependencies**.
+**Targets:** 3000-page PDF end-to-end in well under an hour on CPU; table
+accuracy prioritized; zero silent data loss (errors must surface as
+`needs_review`, never as quietly wrong content).
 
-This document is the *current* design: it started from an initial spec and
-was revised in review. Where a revision overruled the original, the
-reasoning is kept inline — those trade-off notes are the point of this repo.
+This document is the *current* design. It started from an initial spec
+that used a vision LLM (Gemini) for scanned pages and tables; review and
+corpus analysis revised it repeatedly, and the biggest revision — dropping
+the LLM entirely — is documented in §7 with its reasoning. The revision
+trail is deliberate: the trade-offs are the point of this repo.
 
 ---
 
@@ -19,13 +23,14 @@ reasoning is kept inline — those trade-off notes are the point of this repo.
 
 | Component | Does | Does NOT |
 | --- | --- | --- |
-| **PyMuPDF** | open PDF, triage pages, extract text on text-native pages, render pixmaps, crop bboxes, extract embedded images | classify regions semantically, read scanned pages |
-| **DocLayout-YOLO** | return `{label, bbox, conf}` for a page image | open PDFs, render, extract content |
-| **Gemini** | convert page/crop images to markdown; caption figures | anything a local tool already does for free |
+| **PyMuPDF** | open PDF, triage pages, extract text on text-native pages, render pixmaps, crop bboxes, extract embedded images, host the OCR engine | classify regions semantically, find borderless tables |
+| **DocLayout-YOLO** | return `{label, bbox, conf}` per page image | open PDFs, render, extract any content |
+| **Tesseract** (via PyMuPDF) | recover text from scanned pages | table *structure*, image description |
 
-**Cost rule:** never send the API something a local tool already produced.
-(Captioning figures is allowed — that's *description*, which no local tool
-can do, not re-extraction.)
+**Cost rule (generalized from "never pay the API twice"):** never run an
+expensive extractor on content a cheaper one already handled. Exact native
+text beats OCR; OCR beats nothing; every escalation must be justified by
+the cheaper tier's failure.
 
 ---
 
@@ -34,23 +39,17 @@ can do, not re-extraction.)
 | Stage | Module | Work | Artifact |
 | --- | --- | --- | --- |
 | 1 Triage | `triage.py` | page kind per page | `stages/01_triage.json` |
-| 2 Local extract | `local_extract.py` | text/heading/figure units, free | `stages/02_units_local.jsonl` |
-| 3 Render | `render.py` | page images for vision paths | `stages/03_render.json` |
-| 4 Layout | `layout.py` | YOLO boxes, coord conversion | `stages/04_layout.jsonl` |
-| 5 Gemini | `gemini_client.py` | tables + scanned pages -> markdown | `stages/05_gemini.jsonl` |
-| 6 Assemble | `stitch.py`, `assemble.py`, `chunking.py` | merge, stitch, chunk | `stages/06_chunks.jsonl` |
+| 2 Local extract | `local_extract.py` | text/heading/figure units, free | `stages/02_units_local.jsonl`, `02_ruled_grids.json` |
+| 3 Render | `render.py` | page images, debug JPEGs, drawing-page PNGs | `stages/03_render.json` |
+| 4 Layout | `layout.py` | YOLO boxes, px→pt conversion | `stages/04_layout.jsonl` |
+| 5 OCR | `ocr.py` | scanned-page prose via Tesseract | `stages/05_ocr_units.jsonl` |
+| 6 Tables | `tables.py` | tiered table extraction + stitching | `stages/06_tables.jsonl` |
+| 7 Assemble | `assemble.py`, `chunking.py` | dedup, merge walk, chunk | `stages/07_chunks.jsonl` |
 
-Every stage checkpoints its full output to disk before the next stage reads
-it. `--from-stage N` reloads stage N-1's artifact instead of recomputing —
-re-tuning a prompt never re-runs (or re-pays for) earlier stages. Stages
-1–4 are local, totalling ~3–4 minutes on 3000 pages; stage 5 owns the rest
-of the time budget and runs concurrently.
-
-*Trade-off, stated honestly:* production pipelines usually keep
-intermediates in memory/queues and dump artifacts only on failure. Here the
-artifacts are the learning and debugging instrument, so they are always
-written; images saved for humans are downscaled JPEGs (`debug/`), while the
-pipeline works on full-quality images in memory.
+Every stage checkpoints its full output before the next stage reads it;
+`--from-stage N` reloads instead of recomputing. All stages are local, so
+checkpointing here buys iteration speed and crash recovery rather than
+API-cost savings.
 
 ---
 
@@ -62,213 +61,143 @@ One decision per page: does it have a usable text layer?
 TEXT_NATIVE  >= 50 chars of text and no dominating raster image
 SCANNED      raster image covers > 70% of the page (regardless of text!)
              OR near-textless and not a drawing
-DRAWING      near-textless with >= 100 vector segments (CAD plans etc.)
+DRAWING      near-textless with >= 100 deduplicated vector segments
 ```
 
-The >70%-image guard catches the nastiest triage trap: scanned pages where
-a scanner stamped real text headers — text length alone would call them
-TEXT_NATIVE and local extraction would silently drop the page body.
-Thresholds are biased so errors fall toward "one wasted API call", never
-toward "silent garbage in the corpus". Every verdict is logged with its
-evidence and a one-line reason (see the stage artifact).
+The >70%-image guard catches the nastiest trap: scanned pages with a
+scanner-stamped text header, which text-length alone would misroute into
+local extraction — silently dropping the page body. Thresholds are biased
+so errors fall toward "one wasted OCR pass", never toward silent garbage.
+Every verdict is logged with its evidence in the stage artifact.
 
-Triage is single-threaded on purpose: PyMuPDF `Document` objects are not
-thread-safe, and 3000 `get_text` calls take ~10–20 s anyway.
+Single-threaded on purpose: PyMuPDF `Document` objects are not
+thread-safe; parallelism, when needed, shards page ranges across
+*processes*.
 
 ---
 
 ## 3. STAGE 2 — Local extraction (TEXT_NATIVE pages)
 
-* **Body font size**, computed once document-wide: sample pages spread
-  across the document (not just the front — front matter is
-  unrepresentative), count characters per rounded span size, take the mode
-  by *character* count.
-* **Per page:** walk `get_text("dict")` blocks; emit TEXT units for prose,
-  TITLE units where `span.size >= body_size * 1.15` or bold text matching
-  `^\d+(\.\d+)*\s+\S` (numbered clauses), FIGURE units for embedded images
-  (cropped to PNG at 200 DPI and stored — the PNG is the artifact).
-* **Ruled-line detection:** count axis-aligned h/v segments from
-  `get_drawings()`. Revised role (see §5): this is a *cross-check* on YOLO
-  table boxes, **not** a router that decides whether YOLO runs.
+* **Body font size**: character-weighted mode of span sizes, sampled
+  across the whole document (front matter is unrepresentative).
+* **Per line**: heading if `size >= body * 1.15` OR (bold AND matches
+  `^\d+(\.\d+)*\s`); consecutive body lines of a block merge into one
+  paragraph unit. Classification granularity is the LINE — spans fragment,
+  blocks over-merge.
+* **TITLE units carry their raw font size** — heading *levels* can only be
+  assigned document-wide (stage 7 clusters sizes).
+* **Embedded figures** cropped to `figures/*.png`; images under 0.5% of
+  page area are skipped as logo/watermark noise.
+* **Ruled grids**: deduplicated axis-aligned segment counts + tight bbox —
+  *evidence for the table stage, never a router*.
 
-**Dedup rule (added in review):** once table bboxes are known, all local
-text units whose bbox falls inside a table region are dropped. Without
-this, table content appears twice in assembly — once as garbled prose
-spans, once as extracted markdown. This is the most important correctness
-rule in the local path.
+The extraction walk accepts any textpage (`textpage=` seam), which is what
+lets stage 5 reuse it verbatim for OCR output.
 
 ---
 
 ## 4. STAGE 3 — Rendering
 
-`page.get_pixmap(dpi=200)` for every page a vision path needs. 150 DPI
-nearly halves render time and memory; benchmark table accuracy at both
-before committing (§11). Never hold thousands of page images in memory —
-render lazily in the consuming worker or behind a bounded queue. For
-parallel rendering, shard page ranges across *processes* (one `Document`
-per process — thread pools are unsafe here).
+200 DPI default (150 halves cost — benchmark before committing, §10).
+Rendering interleaves with detection in one per-page loop; page images are
+never accumulated (a 200-DPI A4 pixmap is ~11 MB; 3000 of them is 30+ GB).
+DRAWING pages are stored wholesale as figure PNGs and skip all further
+processing. Debug JPEGs are separate low-res renders — never derived from
+the pipeline pixmap (mutating a pixmap after exporting its buffer breaks
+PyMuPDF's cached memoryview).
 
 ---
 
 ## 5. STAGE 4 — Layout detection
 
-**Revised decision: YOLO runs on every page.** The original design skipped
-YOLO on text-native pages with ruled tables, using the ruled-line grid as
-the box source. Review overruled it: the ruled heuristic false-positives on
-page borders and letterheads, merges adjacent tables into one box, and —
-worst — a page with one ruled table and one borderless table would skip
-YOLO and silently miss the second table. YOLO on 3000 pages costs a few
-GPU-minutes inside a budget dominated by stage 5; the simpler pipeline wins.
-Ruled-line grids survive as a cross-check that refines/validates YOLO boxes.
-
-Keep `table` and `figure` boxes; pad by ~10 px to avoid clipping captions
-and footnote rows.
+DocLayout-YOLO on every SCANNED and TEXT_NATIVE page; keep `table` and
+`figure` regions; pad boxes ~10 px so captions and final rows aren't
+clipped. YOLO is not gated on ruled-line detection: the ruled heuristic
+false-positives on borders and misses the borderless table on a mixed
+page. (Corpus says borderless is rare — but "rare" is found by looking,
+and YOLO is how we look.)
 
 **Coordinate conversion — the most likely bug in this pipeline.** YOLO
-returns rendered-image *pixels*; PyMuPDF operates in PDF *points*. One
-helper does every conversion, and it derives scale from actual dimensions —
-`scale_x = page.rect.width / pix.width` — rather than assuming `72/DPI`,
-which silently breaks on rotated pages and non-origin cropboxes. The stage
-artifact records both pixel and point boxes so the conversion is auditable.
-No pixel coordinate escapes stage 4.
+returns rendered-image pixels; PyMuPDF crops in PDF points. One helper
+(`pixel_rect_to_pdf`) does every conversion: scale derived from *actual*
+`page.rect` vs pixmap dimensions (never `72/DPI`, which breaks silently on
+rotation and cropbox offsets), clamped into the page, asserted
+non-degenerate. Pixel coordinates never escape stage 4; the artifact
+records both boxes side by side for auditability.
 
 ---
 
-## 6. STAGE 5 — Gemini
+## 6. STAGE 5 — OCR (SCANNED pages)
 
-### 6.1 Routing
+PyMuPDF wheels bundle libtesseract — no system install, no container; the
+language file auto-downloads to `.tessdata/` (same lazy-fetch pattern as
+the YOLO weights). `get_textpage_ocr(dpi=300, full=True)` returns a
+textpage with the same block/line/span shape as native text, so scanned
+pages flow through the stage-2 walk unchanged, tagged
+`source=tesseract_ocr`.
 
-| Page kind | Region | Route |
+Known limits, accepted and ledgered: no per-word confidence through the
+bundled integration (stamps/signatures pass as junk words); OCR quality is
+capped by the scan's native resolution — upsampling cannot restore detail.
+Production variants: OCR-as-a-service in docker-compose for independent
+scaling; pytesseract TSV for confidence filtering.
+
+---
+
+## 7. STAGE 6 — Tables: the tiered ladder (and why there is no LLM tier)
+
+| Tier | Case | Method |
 | --- | --- | --- |
-| TEXT_NATIVE | prose | local (stage 2) — never sent |
-| TEXT_NATIVE | table | crop -> Gemini |
-| TEXT_NATIVE | figure | local PNG + one captioning call |
-| SCANNED | whole page | full-page image -> Gemini |
-| SCANNED | table | crop -> Gemini separately; spliced over the page result |
-| SCANNED | figure | crop -> PNG + one captioning call |
-| DRAWING | whole page | rendered PNG + one captioning call; never text-extracted |
+| 1 | Bordered table, text-native page | PyMuPDF `find_tables()` — vector lines + exact native text; zero OCR, zero hallucination |
+| 2 | Bordered table, scanned page | image line detection → cell grid → per-cell OCR |
+| — | Anything failing validation | `needs_review=true` + stored crop PNG for **human** review |
 
-Scanned pages are sent twice (whole page + isolated table crops): isolated
-crops extract tables measurably better than tables embedded in a dense
-page, and accuracy outranks cost here.
+**Validation gate** (decides tier success): column-count consistency
+across rows, non-empty header, cell coverage of the region bbox.
 
-**Splice mechanics (added in review):** the full-page prompt instructs the
-model to emit a `[TABLE]` placeholder where each table sits instead of
-attempting the table inline. Table crops then replace placeholders in
-reading order. Without a placeholder protocol, "crop overrides page result"
-requires locating a table inside free-form markdown — unspecified and
-fragile. Figure markers work the same way (`![figure](FIG)`), matched to
-YOLO figure boxes by reading order; a count mismatch sets `needs_review`.
+**The dropped tier.** The original design used a vision LLM as tier 3
+(borderless tables, low-quality scans, figure captions). Dropped after
+corpus analysis: bordered tables dominate and scans are machine-typeset.
+The determining arguments, kept for the record:
 
-**Captioning (added in review):** figures and drawing pages get one cheap
-vision call for a 1–2 sentence caption. A figure chunk with empty text is
-unfindable by vector search; the caption is what makes it retrievable.
+* geometric+OCR table extraction **cannot hallucinate** — a misread is
+  visibly garbled, a VLM error is fluent and plausible (`120.00` →
+  `210.00`), which is the worst property for numeric tables;
+* the fallback tier is now a human (`needs_review` + crop) — honest,
+  auditable, and free;
+* the cost: borderless tables and figure captions are unhandled. YOLO
+  still *detects* borderless tables, so they surface as review items, not
+  silent misses. If the corpus changes, the validation gate is exactly
+  where a VLM tier plugs back in.
 
-### 6.2 Model tiering (revised from a single fixed model)
-
-`gemini-2.5-flash` for everything; escalate to `gemini-2.5-pro` only for
-table crops that fail validation. Validation has two independent triggers:
-
-* the model's own sanctioned failure channel — prompts instruct it to
-  output `<!-- BROKEN -->` when structure can't be recovered (without a
-  sanctioned way to fail, a vision model invents a plausible table);
-* a local check — column-count consistency across rows, non-empty header —
-  which catches failures the model does *not* admit to.
-
-Escalation failing too -> `needs_review = true`, keep the best attempt,
-never block the run.
-
-### 6.3 Concurrency
-
-Async semaphore sized from actual rate limits; 3 retries with exponential
-backoff and jitter; a page that fails all retries is flagged, not fatal.
-Partial results with review flags beat all-or-nothing batches.
-
-### 6.4 What the API is never asked for
-
-Bounding boxes, region types, page numbers — the local pipeline already
-knows them. Ask only for content.
+**Multi-page tables are in scope** (price schedules span many pages):
+continuation detected via bottom-margin exit + top-margin table entry +
+compatible column signature; merged by row concatenation (repeated-header
+fuzzy match dropped); column-count mismatch → refuse to merge, flag both.
+Merged tables chunk as row groups with the header repeated per chunk,
+sharing a `table_id`.
 
 ---
 
-## 7. Multi-page table stitching
+## 8. STAGE 7 — Assembly and chunking
 
-Large tables (price schedules, item lists) routinely span 10+ pages, so
-this is in scope, not deferred.
-
-**Detection** — table on page N continues onto page N+1 when all hold:
-
-1. table N's bbox bottom reaches the page's bottom margin zone;
-2. page N+1's first content region (by y-order) is a table starting in the
-   top margin zone;
-3. column signatures are compatible (same column count after extraction;
-   for ruled tables, column x-boundaries match before extraction — a
-   stronger signal).
-
-**Merge** — fragments are extracted independently (crops stay small and
-accurate; images are never merged, markdown is):
-
-* first row of fragment N+1 fuzzy-matches fragment N's header -> repeated
-  header, drop it, concatenate rows;
-* column counts match, no repeated header -> plain concatenation;
-* column counts disagree -> **refuse to guess**: keep separate chunks, flag
-  both `needs_review`, record the failed merge in the manifest.
-* 3+ page chains: apply pairwise.
-
-**Chunking a merged table** — a 10-page table exceeds any chunk size. It
-stays *logically* atomic but is split into row groups of ~N rows, each
-chunk repeating the header row, all sharing a `table_id` and the full page
-range. Retrieval hits a row group with headers intact; a consumer can
-reassemble the full table via `table_id`.
-
----
-
-## 8. STAGE 6 — Assembly and chunking
-
-### 8.1 Unit contract
-
-Every extraction path emits the same shape before merging (see
-`models.py::Unit`): page, bbox (PDF points), type
-(title/text/table/figure), content, optional heading level and storage
-key, source tag, review flag. Scanned-page markdown from stage 5 is parsed
-into units first (headings from `#` lines, placeholders from §6.1) — the
-merge walk never special-cases by source.
-
-### 8.2 Heading level normalization — before the walk
-
-The vision model assigns `#` depths per page with no document context; a
-`##` on page 412 need not match a `##` on page 8. Reconcile globally:
-
-1. numbered headings (`^\d+(\.\d+)*`): depth = number of segments —
-   authoritative when present;
-2. otherwise cluster local font sizes document-wide, sorted descending ->
-   levels 1..N;
-3. the model's `#` count is a last resort.
-
-### 8.3 Walk
-
-Sort units by `(page, bbox.y0)` (known limitation: fails on multi-column
-layouts). Maintain a heading stack; TITLE units push/pop it. TABLE and
-FIGURE units become atomic chunks immediately — they bypass the text
-chunker entirely so no boundary can split a table mid-row. TEXT units
-accumulate per heading section.
-
-### 8.4 Text chunking — per section, not per document
-
-Each heading section's text is chunked separately (Chonkie recursive
-markdown recipe, ~512 tokens). Revised from a global chunk-then-map-back
-design: per-section chunking means every chunk inherits its section's
-heading breadcrumb and page range directly — no offset arithmetic to
-drift when the chunker normalizes whitespace.
-
-### 8.5 Chunk contract
-
-See `models.py::Chunk`. Key fields: `content` (displayed) vs
-`embedding_text` (vectorized — the heading breadcrumb
-`[7. Payment Terms > 7.3 Liquidated Damages]` is prepended here only,
-which is what makes clause values retrievable from bare-value queries),
-`pages` (1-based, for citation), `bbox`, `source`, `needs_review`,
-`table_id`.
+1. **Dedup rule (most important correctness rule):** drop stage-2/5 TEXT
+   units whose bbox falls inside a table region — otherwise table content
+   appears twice (garbled prose + extracted table). Containment by unit
+   *center*, not any-intersection, so padded table boxes don't eat
+   neighboring prose lines.
+2. **Heading levels**, document-wide: numbered headings (`7.3.1` → depth
+   3) are authoritative; otherwise cluster TITLE font sizes descending →
+   levels. (Dropping the LLM simplified this: no per-page `#` depths to
+   reconcile.)
+3. **Walk** units sorted by `(page, y0)`: heading stack, tables/figures as
+   atomic chunks, text accumulated per heading section. Known limit:
+   multi-column reading order (untested; column detection via x-gap
+   clustering is the production fix).
+4. **Chunking per heading section** (~512 tokens): each chunk inherits its
+   section's breadcrumb and page range directly — no offset arithmetic.
+   `content` is displayed; `embedding_text` carries the breadcrumb prefix
+   that makes bare values retrievable ("what is the LD rate?").
 
 ---
 
@@ -276,56 +205,36 @@ which is what makes clause values retrievable from bare-value queries),
 
 | Artifact | Purpose | Source of truth? |
 | --- | --- | --- |
-| `chunks.jsonl` | retrieval, citation, Q&A | **yes** |
-| `merged.md` | human review, debugging, diffing versions | no |
+| `chunks.jsonl` (stage 7) | retrieval, citation, Q&A | **yes** |
+| `merged.md` | human review, debugging, diffing | no |
 | `manifest.json` | page kinds, timings, review flags | run record |
 
-The `.md` loses page numbers and bboxes — the things citation needs — so
-it must never become authoritative. Tables are inlined into the `.md` for
-readability even though chunking treats them atomically.
-
-Storage is local disk (`output/<doc_id>/`); `storage_key` values are
-relative paths. Swapping to object storage + a vector DB is a storage-
-adapter change, not a pipeline change.
+Local disk; `storage_key` values are relative paths. Object storage + a
+vector DB is a storage-adapter swap, not a pipeline change.
 
 ---
 
-## 10. Edge-case policy
+## 10. Validate before building
 
-Every edge case is either **handled**, **flagged** (`needs_review`), or
-**accepted** with its cost documented — see
-[edge_cases.md](edge_cases.md). Nothing is silently ignored. Known open
-items: multi-column reading order (untested), unnumbered headings at body
-size (accepted miss).
-
----
-
-## 11. Validate before building
-
-In order — each can invalidate work below it:
-
-1. **DPI test:** ~20 hard tables at 150 vs 200 DPI — decides render budget.
-2. **Table bake-off:** same tables via PyMuPDF `find_tables()` vs
-   Gemini-on-crop vs Gemini-on-full-page — decides whether YOLO and the
-   crop path earn their place.
-3. **Triage thresholds:** run stage 1 on real documents, audit the
-   decision log for misclassification.
-4. **Timing spike:** ~200 representative pages end-to-end, extrapolate,
-   confirm the 20-minute budget before writing stages 5–6.
-5. **YOLO box tightness:** tables with captions/footnotes directly
-   beneath — tune the padding.
+1. **DPI test** — 20 hard tables at 150 vs 200 DPI render.
+2. **Table bake-off** — same tables: `find_tables()` vs cell-grid+OCR;
+   decides how much tier 2 must carry.
+3. **Triage thresholds** — stage-1 decision log audited on real docs.
+4. **OCR quality sample** — real scanned pages through stage 5; decides
+   whether confidence filtering must be pulled forward.
+5. **Timing spike** — 200 representative pages end-to-end, extrapolated.
 
 ---
 
-## 12. Dependencies
+## 11. Dependencies
 
 ```text
-pymupdf          (pinned exactly)
-doclayout-yolo   (pinned — API moves between minor releases)
-google-genai
-chonkie          (pinned — same reason)
-pillow
+pymupdf          (pinned; bundles the OCR engine)
+doclayout-yolo   (pinned; pulls torch — see ledger #14 for the ONNX path)
+huggingface-hub  (model weights fetch)
+numpy
+chonkie          (stage 7, pinned when added)
 ```
 
-No agent framework: routing here is deterministic booleans over
-validators. An LLM decides nothing about control flow.
+Fully local: no API keys, no network calls after model/tessdata download.
+No agent framework: routing is deterministic booleans over validators.

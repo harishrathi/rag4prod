@@ -13,8 +13,9 @@ Page map (0-based) and the triage branch each page exists to exercise:
                                           extraction, Phase 2)
     1  prose + numbered headings       -> TEXT_NATIVE  (heading detection incl. a
                                           body-size bold numbered heading, Phase 2)
-    2  full-page raster, no text       -> SCANNED      (classic scan)
-    3  full-page raster + header text  -> SCANNED      (the header-over-scan TRAP:
+    2  raster image of printed text    -> SCANNED      (classic scan; OCR reads
+                                          its body in Phase 4)
+    3  same raster + header text layer -> SCANNED      (the header-over-scan TRAP:
                                           text length alone would say TEXT_NATIVE)
     4  dense vector line-work, no text -> DRAWING      (CAD-plan stand-in)
     5  title page, ~15 chars of text   -> SCANNED      (accepted misroute: costs
@@ -85,11 +86,33 @@ def _gray_png(w: int, h: int, value: int) -> bytes:
     return pix.tobytes("png")
 
 
+def _printed_body_png() -> bytes:
+    """A raster image OF printed text — what a real scanner produces.
+    Rendered from a throwaway text page so OCR has genuine glyphs to
+    read; the resulting page has an image, but NO text layer.
+
+    Rendered at 200 DPI / 12pt on purpose: a first attempt at 150 DPI and
+    11pt made Tesseract glue words together — inter-word gaps fell below
+    the space-synthesis threshold. Same rule as real scanners: OCR quality
+    is capped by the scan's native resolution, and OCR_DPI upsampling
+    cannot restore detail the scan never captured (ledger #16)."""
+    tmp = pymupdf.open()
+    p = tmp.new_page(width=PAGE_W, height=PAGE_H)
+    p.insert_text((72, 90), "4. Delivery Conditions", fontsize=16, fontname="hebo")
+    p.insert_textbox(
+        pymupdf.Rect(72, 120, PAGE_W - 72, 500), LOREM * 3, fontsize=12, fontname="helv"
+    )
+    png = p.get_pixmap(dpi=200).tobytes("png")
+    tmp.close()
+    return png
+
+
 def _scan_page(doc: pymupdf.Document, header: str | None) -> None:
-    """Full-page raster image, optionally with a text-layer header on top —
-    the header variant is the trap SCAN_IMAGE_COVERAGE exists to catch."""
+    """Full-page raster image of printed text, optionally with a
+    text-layer header on top — the header variant is the trap
+    SCAN_IMAGE_COVERAGE exists to catch."""
     page = doc.new_page(width=PAGE_W, height=PAGE_H)
-    page.insert_image(pymupdf.Rect(0, 0, PAGE_W, PAGE_H), stream=_gray_png(300, 424, 215))
+    page.insert_image(pymupdf.Rect(0, 0, PAGE_W, PAGE_H), stream=_printed_body_png())
     if header:
         page.insert_text((72, 40), header, fontsize=9, fontname="helv")
 

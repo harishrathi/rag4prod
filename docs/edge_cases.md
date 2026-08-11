@@ -172,4 +172,63 @@ reference this file; this file references code. Grows with each phase.
 
 ---
 
-Phases 4–6 append their sections here as they land.
+## Phase 4 — OCR (scanned pages)
+
+### 15. Tesseract deployment: bundled vs system vs Docker
+
+- **Symptom:** OCR engines are system binaries; "pip install" doesn't
+  cover them, and every deployment option changes the code shape.
+- **Handling:** `handled` — PyMuPDF wheels BUNDLE libtesseract; only the
+  language data file is fetched (auto-download to .tessdata/, same
+  pattern as YOLO weights). Zero system installs, zero containers, and
+  `get_textpage_ocr` returns the same textpage structure as native text,
+  so the stage-2 walk runs on scanned pages unchanged.
+- **Production note:** at scale, OCR-as-a-service in docker-compose
+  (e.g. hertzg/tesseract-server) gives OCR its own CPU pool and
+  independent scaling — at the cost of an HTTP hop and rebuilding the
+  block/line mapping from hOCR/TSV yourself.
+
+### 16. OCR confidence and scan-resolution limits
+
+- **Symptom:** stamps, signatures, and handwriting OCR into junk words;
+  and low-resolution scans lose word boundaries — a 150-DPI 11pt test
+  scan came back with words glued together because inter-word gaps fell
+  below the space-synthesis threshold.
+- **Handling:** `accepted` — the bundled integration does not expose
+  per-word confidence, so junk words pass through untagged for now.
+  OCR_DPI upsampling cannot restore detail the scan never captured;
+  quality is capped at scan time.
+- **Production note:** the pytesseract TSV route or an OCR service
+  exposes per-word confidence — filter below ~60 and flag the page
+  `needs_review`. That is the right tool against stamps/handwriting;
+  a "better engine" is not.
+
+### 17. OCR textpages emit words as separate spans
+
+- **Symptom:** on native textpages, spaces live inside word spans; on
+  OCR textpages every word is its own span with whitespace-only spans
+  between. Our extraction walk filtered whitespace spans before joining
+  — silently gluing all OCR text into `Thesuppliershallcomplete...`.
+- **Handling:** `handled` — join all spans (then collapse whitespace)
+  for the line text; filter whitespace spans only for classification.
+  The general lesson: an invariant that holds for one producer of a
+  shared structure will silently break for the next producer.
+
+### 18. Gemini dropped — the fallback tier is a human, not a model
+
+- **Symptom:** the original design used a vision LLM for scanned tables,
+  borderless tables, and figure captions.
+- **Handling:** `accepted` (decision, 2026-08-11) — the target corpus
+  has bordered tables and machine-typeset scans, so the paid tier was
+  dropped entirely. Tables: tier 1 `find_tables()` (text-native),
+  tier 2 image-line grid + per-cell OCR (scanned); anything failing
+  validation gets `needs_review=true` plus a stored crop PNG for human
+  review instead of an API fallback. Figures get no captions; their
+  retrievability relies on breadcrumbs + nearby caption text (Phase 6).
+- **Production note:** if borderless tables ever appear in the corpus,
+  the tier-3 slot is where a VLM plugs back in — the validation gate
+  that would route to it already exists.
+
+---
+
+Phases 5–6 append their sections here as they land.

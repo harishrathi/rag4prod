@@ -43,12 +43,11 @@ class UnitType(StrEnum):
 class Source(StrEnum):
     """Which extraction path produced a Unit. Carried through to the final
     chunk so that quality problems can be traced back to their origin
-    ("all the broken tables came from gemini_page? then full-page prompts
-    are the problem, not crops")."""
+    ("all the garbled prose has source=tesseract_ocr? then OCR quality is
+    the problem, not the text walk")."""
 
-    PYMUPDF = "pymupdf"
-    GEMINI_PAGE = "gemini_page"
-    GEMINI_CROP = "gemini_crop"
+    PYMUPDF = "pymupdf"  # native text layer — exact, free
+    TESSERACT_OCR = "tesseract_ocr"  # scanned pages via bundled Tesseract
 
 
 # A bbox is always (x0, y0, x1, y1) in PDF points (72 per inch), in the

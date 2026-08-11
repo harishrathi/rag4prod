@@ -8,19 +8,21 @@ either handled or consciously accepted in
 [docs/edge_cases.md](docs/edge_cases.md).
 
 **Stack:** [PyMuPDF](https://pymupdf.readthedocs.io/) (triage, local
-extraction, rendering) + DocLayout-YOLO (layout detection) + Gemini
-(vision extraction of tables and scanned pages). Full architecture and
-the reasoning behind every design decision:
-[docs/design_spec.md](docs/design_spec.md).
+extraction, rendering, bundled Tesseract OCR) + DocLayout-YOLO (layout
+detection) — **fully local, no API keys**. Full architecture and the
+reasoning behind every design decision, including why the original
+vision-LLM tier was dropped: [docs/design_spec.md](docs/design_spec.md).
 
 ## Pipeline
 
 ```text
 PDF ──1 triage──▶ page kinds ──2 local extract──▶ units (free, exact)
         │
-        └─▶ 3 render ──▶ 4 layout (YOLO) ──▶ 5 Gemini ──▶ units
-                                                            │
-                    6 assemble + chunk ◀────────────────────┘
+        └─▶ 3 render ──▶ 4 layout (YOLO) ──▶ 5 OCR (Tesseract) ──▶ units
+                              │                                      │
+                              └──▶ 6 tables (tiered ladder) ──▶ units│
+                                                                     │
+                    7 assemble + chunk ◀─────────────────────────────┘
                         │
                         └─▶ chunks.jsonl (retrieval-ready, cited by page + bbox)
 ```
@@ -37,9 +39,9 @@ recomputing — or re-paying for — earlier stages.
 | 1 | Project setup, contracts, triage | ✅ |
 | 2 | Local extraction (text, headings, figures, ruled tables) | ✅ |
 | 3 | Rendering + YOLO layout detection | ✅ |
-| 4 | Gemini extraction (tables, scanned pages) | ⬜ |
-| 5 | Multi-page table stitching, assembly, chunking | ⬜ |
-| 6 | End-to-end hardening | ⬜ |
+| 4 | OCR for scanned pages (bundled Tesseract) | ✅ |
+| 5 | Tiered table extraction + multi-page stitching | ⬜ |
+| 6 | Assembly, dedup, chunking | ⬜ |
 
 ## Setup
 

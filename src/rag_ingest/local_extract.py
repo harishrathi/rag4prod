@@ -106,6 +106,26 @@ def estimate_body_font_size(doc: pymupdf.Document, text_pages: list[int]) -> flo
     return body
 
 
+def page_body_font_size(page: pymupdf.Page, textpage: pymupdf.TextPage) -> float:
+    """Character-weighted body size for ONE page's textpage.
+
+    Exists for the OCR path: OCR-synthesized span sizes are not
+    comparable to native-text sizes (a 12pt print OCRs to ~11.9pt while
+    the native body measures 10pt), so judging OCR lines against the
+    document-wide native body size misclassifies ordinary prose as
+    headings. Each OCR page is judged against its own size distribution.
+    """
+    chars_per_size: Counter[int] = Counter()
+    d = cast(dict, page.get_text("dict", textpage=textpage))
+    for block in d["blocks"]:
+        if block["type"] != 0:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                chars_per_size[round(span["size"])] += len(span["text"].strip())
+    return float(chars_per_size.most_common(1)[0][0]) if chars_per_size else 10.0
+
+
 # ---------------------------------------------------------------------------
 # Per-page extraction
 # ---------------------------------------------------------------------------
@@ -138,15 +158,33 @@ def _extract_figure(
 
 
 def extract_page(
-    page: pymupdf.Page, page_index: int, body_size: float, figures_dir: Path
+    page: pymupdf.Page,
+    page_index: int,
+    body_size: float,
+    figures_dir: Path,
+    *,
+    textpage: pymupdf.TextPage | None = None,
+    source: Source = Source.PYMUPDF,
+    include_figures: bool = True,
 ) -> list[Unit]:
-    """One TEXT_NATIVE page -> TITLE/TEXT/FIGURE units in top-to-bottom order."""
+    """One page -> TITLE/TEXT/FIGURE units in top-to-bottom order.
+
+    The ``textpage`` seam is what lets stage 5 reuse this walk unchanged:
+    an OCR textpage (get_textpage_ocr) has the same block/line/span shape
+    as a native one, so scanned pages flow through the exact same
+    classification and paragraph-merging logic — only ``source`` differs.
+    OCR callers pass include_figures=False: on a scanned page the "image
+    block" is the page-sized scan itself, which must not be re-stored as
+    a figure (real figure regions come from YOLO instead).
+    """
     units: list[Unit] = []
     fig_index = 0
-    d = cast(dict, page.get_text("dict"))
+    d = cast(dict, page.get_text("dict", textpage=textpage))
 
     for block in d["blocks"]:
         if block["type"] == 1:  # image block
+            if not include_figures:
+                continue
             fig = _extract_figure(
                 page, pymupdf.Rect(block["bbox"]), page_index, fig_index, figures_dir
             )
@@ -169,16 +207,23 @@ def extract_page(
                         bbox=_bbox(para_bbox),
                         type=UnitType.TEXT,
                         content=" ".join(para_lines),
-                        source=Source.PYMUPDF,
+                        source=source,
                     )
                 )
             para_lines, para_bbox = [], None
 
         for line in block["lines"]:
+            # Join ALL spans for the text, including whitespace-only ones:
+            # native textpages carry spaces inside word spans, but OCR
+            # textpages emit every word as its own span with separate
+            # space spans between — filtering whitespace spans before the
+            # join silently glues OCR words together (found live, ledger
+            # #17). Non-whitespace spans are still what classification
+            # looks at.
+            text = re.sub(r"\s+", " ", "".join(s["text"] for s in line["spans"])).strip()
             spans = [s for s in line["spans"] if s["text"].strip()]
-            if not spans:
+            if not spans or not text:
                 continue
-            text = "".join(s["text"] for s in spans).strip()
             main = _dominant_span(spans)
             is_bold = bool(main["flags"] & _BOLD_FLAG)
             is_heading = main["size"] >= body_size * HEADING_SIZE_RATIO or (
@@ -194,7 +239,7 @@ def extract_page(
                         type=UnitType.TITLE,
                         content=text,
                         font_size=round(main["size"], 1),
-                        source=Source.PYMUPDF,
+                        source=source,
                     )
                 )
             else:
