@@ -62,6 +62,14 @@ class Region:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, d: dict) -> Region:
+        """Rehydrate from the stage-4 artifact (--from-stage resume)."""
+        d = dict(d)
+        d["bbox_px"] = tuple(d["bbox_px"])
+        d["bbox_pdf"] = tuple(d["bbox_pdf"])
+        return cls(**d)
+
 
 def pixel_rect_to_pdf(
     x0: float,
@@ -88,9 +96,11 @@ def pixel_rect_to_pdf(
         min(page_rect.x1, page_rect.x0 + x1 * sx),
         min(page_rect.y1, page_rect.y0 + y1 * sy),
     )
-    assert bbox[0] <= bbox[2] and bbox[1] <= bbox[3], (
-        f"degenerate bbox after conversion: {bbox} from px ({x0},{y0},{x1},{y1})"
-    )
+    # A real exception, not an assert: this guard is load-bearing (a
+    # degenerate box means a silent empty crop downstream) and must not
+    # vanish under `python -O`.
+    if bbox[0] > bbox[2] or bbox[1] > bbox[3]:
+        raise ValueError(f"degenerate bbox after conversion: {bbox} from px ({x0},{y0},{x1},{y1})")
     return bbox
 
 

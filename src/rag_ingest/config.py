@@ -151,6 +151,24 @@ TESSDATA_URL = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.trai
 # below ~250 accuracy drops off; above ~350 costs time for no gain.
 OCR_DPI = 300
 
+# OCR quality gate. ocr_quality_score() is the fraction of OCR tokens
+# that look like language (words with vowels, numbers) rather than
+# symbol soup. Calibrated on real pipeline output: clean Tesseract text
+# aggregates >= 0.9 per page, sideways/garbage OCR lands around 0.4-0.6.
+# Below this threshold a page's units (or a tier-2 table) are flagged
+# needs_review instead of entering the corpus as confident text —
+# ledger #16's "silent junk words" failure class, now caught at the
+# page level even without per-word confidences.
+OCR_MIN_QUALITY = 0.65
+
+# Orientation recovery (rotated/landscape scans). Detection OCRs a small
+# render of the page and, if quality is below OCR_MIN_QUALITY, retries at
+# 90/180/270. Low DPI keeps the probe cheap (~4x faster than a full OCR
+# pass); the winning orientation must beat the current one by MIN_GAIN so
+# noise on a genuinely bad scan can't flip a page sideways.
+ORIENTATION_DPI = 120
+ORIENTATION_MIN_GAIN = 0.2
+
 # ---------------------------------------------------------------------------
 # STAGE 6 — Tables (rag_ingest/tables.py)
 # ---------------------------------------------------------------------------

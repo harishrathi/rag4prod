@@ -53,6 +53,7 @@ class TriageRecord:
     max_image_coverage: float  # largest single raster image / page area
     drawing_segments: int | None  # only counted for near-textless pages
     reason: str
+    rotation_applied: int = 0
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -128,8 +129,16 @@ def triage_page(page: pymupdf.Page, page_index: int) -> TriageRecord:
     )
 
 
-def triage(doc: pymupdf.Document) -> list[TriageRecord]:
+def triage(doc: pymupdf.Document, fix_orientation: bool = True) -> list[TriageRecord]:
     """Classify every page of an open document.
+
+    SCANNED pages additionally get an orientation probe (ledger #28): a
+    landscape/rotated scan OCRs into garbage in every later stage, and
+    triage is the last point where fixing it is cheap — one in-memory
+    ``set_rotation`` here and rendering, YOLO, OCR, and table crops all
+    see the page upright. The probe costs one low-DPI OCR per healthy
+    scanned page; ``fix_orientation=False`` skips it for callers that
+    only need the classification.
 
     Deliberately single-threaded; see the module docstring for why a
     thread pool would be a bug here.
@@ -139,6 +148,26 @@ def triage(doc: pymupdf.Document) -> list[TriageRecord]:
     # slices), load_page is typed -> Page — and the index is needed for
     # the record anyway.
     records = [triage_page(doc.load_page(i), i) for i in range(doc.page_count)]
+
+    if fix_orientation:
+        from .ocr import detect_orientation  # deferred: pulls numpy + tessdata
+
+        for r in records:
+            if r.kind != PageKind.SCANNED:
+                continue
+            page = doc.load_page(r.page)
+            delta, before, after = detect_orientation(page)
+            if delta:
+                page.set_rotation((page.rotation + delta) % 360)
+                r.rotation_applied = delta
+                r.reason += f"; rotated {delta} deg (OCR quality {before:.2f} -> {after:.2f})"
+                log.info(
+                    "p%04d: orientation fixed by %d deg (quality %.2f -> %.2f)",
+                    r.page,
+                    delta,
+                    before,
+                    after,
+                )
 
     counts: dict[str, int] = {}
     for r in records:

@@ -42,6 +42,7 @@ recomputing — or re-paying for — earlier stages.
 | 4 | OCR for scanned pages (bundled Tesseract) | ✅ |
 | 5 | Tiered table extraction + multi-page stitching | ✅ |
 | 6 | Assembly, dedup, chunking | ✅ |
+| 7 | Complex tables (merged cells, spans → JSON + HTML), OCR quality gate + orientation recovery, real `--from-stage` resume, clean rejection | ✅ |
 
 ## Setup
 
@@ -54,11 +55,14 @@ pip install -e ".[dev]"
 ## Run
 
 ```bash
-# generate the synthetic 7-page test PDF (every triage branch represented)
+# generate the synthetic test PDFs: sample_doc (every triage branch) and
+# complex_doc (merged cells, rotated scans, borderless + multi-page tables)
 python -m rag_ingest.sample_pdf
+python -m rag_ingest.complex_pdf
 
-# run the pipeline on it
+# run the pipeline
 rag-ingest sample_data/sample_doc.pdf
+rag-ingest sample_data/complex_doc.pdf
 
 # inspect what happened, stage by stage
 cat output/sample_doc/stages/01_triage.json

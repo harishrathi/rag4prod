@@ -94,6 +94,7 @@ class _ChunkBuilder:
         self._texts: list[str] = []
         self._pages: set[int] = set()
         self._source: Source = Source.PYMUPDF
+        self._review = False  # any accumulated unit flagged (OCR gate, ledger #28)
 
     # -- helpers ------------------------------------------------------------
 
@@ -123,12 +124,16 @@ class _ChunkBuilder:
                     headings=[h for _, h in self.stack],
                     pages=pages,
                     source=self._source,
+                    # Conservative: one flagged unit taints the whole
+                    # section's chunks — better a spurious review than
+                    # confident garbage.
+                    needs_review=self._review,
                     # Real tokenizer count for the prose + estimate for the
                     # short breadcrumb prefix.
                     token_count=piece_tokens + (_estimate_tokens(crumb) if crumb else 0),
                 )
             )
-        self._texts, self._pages = [], set()
+        self._texts, self._pages, self._review = [], set(), False
 
     # -- walk items ---------------------------------------------------------
 
@@ -137,20 +142,24 @@ class _ChunkBuilder:
         level = item.level or 1
         while self.stack and self.stack[-1][0] >= level:
             self.stack.pop()
-        assert item.unit is not None
+        if item.unit is None:
+            raise ValueError("title walk item without a unit")
         self.stack.append((level, item.unit.content))
         self.md_lines.append(f"\n{'#' * level} {item.unit.content}\n")
 
     def on_text(self, item: WalkItem) -> None:
-        assert item.unit is not None
+        if item.unit is None:
+            raise ValueError("text walk item without a unit")
         self._texts.append(item.unit.content)
         self._pages.add(item.unit.page)
         self._source = item.unit.source
+        self._review = self._review or item.unit.needs_review
         self.md_lines.append(item.unit.content + "\n")
 
     def on_figure(self, item: WalkItem) -> None:
         unit = item.unit
-        assert unit is not None
+        if unit is None:
+            raise ValueError("figure walk item without a unit")
         crumb = self._breadcrumb()
         page_1b = unit.page + 1
         # No caption available (the vision tier was dropped): breadcrumb +
@@ -170,6 +179,7 @@ class _ChunkBuilder:
                 bbox=unit.bbox,
                 storage_key=unit.storage_key,
                 source=unit.source,
+                needs_review=unit.needs_review,
                 token_count=_estimate_tokens(embedding),
             )
         )
@@ -180,7 +190,8 @@ class _ChunkBuilder:
         # order; flush it so ordering survives into the chunk list.
         self._flush_section_text()
         t = item.table
-        assert t is not None
+        if t is None:
+            raise ValueError("table walk item without a table")
         crumb = self._breadcrumb()
         pages = [p + 1 for p in t.pages]
 
@@ -207,12 +218,17 @@ class _ChunkBuilder:
             )
             return
 
-        header, data = t.cells[0], t.cells[1:]
+        # ALL header rows repeat in every row group (a two-tier header's
+        # sub-header row is part of the column meanings, ledger #27) —
+        # and thanks to unmerged cells, every data row carries its
+        # category label, so no group is ever stranded from context.
+        n_head = max(1, min(t.header_rows, len(t.cells) - 1))
+        header, data = t.cells[:n_head], t.cells[n_head:]
         groups = [
             data[i : i + self.rows_per_chunk] for i in range(0, len(data), self.rows_per_chunk)
         ]
         for group in groups:
-            md = cells_to_markdown([header, *group])
+            md = cells_to_markdown([*header, *group])
             embedding = f"{crumb}\n\n{md}" if crumb else md
             self._emit(
                 Chunk(
@@ -227,7 +243,14 @@ class _ChunkBuilder:
                     token_count=_estimate_tokens(embedding),
                 )
             )
-        self.md_lines.append("\n" + t.markdown + "\n")
+        # merged.md is for humans: when the table has merged cells, embed
+        # the ASCII box grid (merged cells draw as one box — looks like
+        # the PDF), fenced for monospace; pipe markdown cannot express
+        # spans.
+        if t.merges:
+            self.md_lines.append("\n```text\n" + t.grid + "\n```\n")
+        else:
+            self.md_lines.append("\n" + t.markdown + "\n")
 
 
 def chunk_document(doc_id: str, walk: list[WalkItem], rows_per_chunk: int = TABLE_ROWS_PER_CHUNK):

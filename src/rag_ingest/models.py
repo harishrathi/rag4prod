@@ -82,6 +82,15 @@ class Unit:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, d: dict) -> Unit:
+        """Rehydrate from a stage artifact row (--from-stage resume)."""
+        d = dict(d)
+        d["bbox"] = tuple(d["bbox"])
+        d["type"] = UnitType(d["type"])
+        d["source"] = Source(d["source"])
+        return cls(**d)
+
 
 @dataclass
 class Chunk:

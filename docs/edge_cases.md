@@ -62,9 +62,11 @@ reference this file; this file references code. Grows with each phase.
 ### 5. Encrypted / corrupt / zero-page PDFs
 
 - **Symptom:** `pymupdf.open()` raises, or `page_count == 0`.
-- **Handling:** `accepted` for now — the pipeline fails fast with the
-  library's own error before any stage runs. Phase 6 wraps this in a
-  clean rejection recorded in the manifest.
+- **Handling:** `handled` (Phase 7) — `pipeline._open_checked` rejects
+  encrypted, unreadable, and zero-page PDFs before any stage runs; the
+  manifest records `status="rejected"` plus a human-readable reason and
+  the CLI exits 2. No raw library traceback, no partial artifact tree
+  for a later `--from-stage` run to trust.
 
 ---
 
@@ -194,10 +196,12 @@ reference this file; this file references code. Grows with each phase.
   and low-resolution scans lose word boundaries — a 150-DPI 11pt test
   scan came back with words glued together because inter-word gaps fell
   below the space-synthesis threshold.
-- **Handling:** `accepted` — the bundled integration does not expose
-  per-word confidence, so junk words pass through untagged for now.
-  OCR_DPI upsampling cannot restore detail the scan never captured;
-  quality is capped at scan time.
+- **Handling:** `accepted` at word level, `handled` at page level
+  (Phase 7, case 28) — per-word confidence is still unavailable, but
+  `ocr_quality_score` now judges each page's aggregate OCR output and
+  flags garbage pages `needs_review`, so junk can no longer enter the
+  corpus *silently*. OCR_DPI upsampling cannot restore detail the scan
+  never captured; quality is capped at scan time.
 - **Production note:** the pytesseract TSV route or an OCR service
   exposes per-word confidence — filter below ~60 and flag the page
   `needs_review`. That is the right tool against stamps/handwriting;
@@ -338,6 +342,61 @@ reference this file; this file references code. Grows with each phase.
   occurring on many pages at the same y-position are headers/footers —
   strip them before assembly. Needs a real multi-page corpus to tune;
   pointless to fake on a 10-page synthetic.
+
+---
+
+## Phase 7 — Complex tables + hardening
+
+Torture-tested against `sample_data/complex_doc.pdf`
+(`python -m rag_ingest.complex_pdf`): merged cells in both tiers,
+two-tier headers, a row-span crossing a page break, a borderless table,
+a rotated scan, and a 31-row schedule vs row-group chunking.
+
+### 27. Merged cells (row-span / col-span), both tiers
+
+- **Symptom:** merged cells break every uniform-grid assumption. Tier 1
+  flattened find_tables' span info into `""`, so a category label
+  existed on one row and vanished from the rest; tier 2 was worse — its
+  imposed uniform grid put a vertically-centered span label into the
+  *middle* row of its span, and blanket line-erasure sliced through
+  span labels before OCR ("Item" → "tein"). Row-group chunking then
+  stranded rows from their labels entirely: a chunk of rows 21-30 had
+  no idea it was "Electrical".
+- **Handling:** `handled` — the cell contract is now UNMERGED: a merged
+  value is repeated into every grid position it covers, in both tiers.
+  Tier 1 reads span geometry from find_tables (`None` = covered, with
+  the anchor's bbox spanning the merge); tier 2 checks each candidate
+  cell boundary for ink individually, union-finds unbordered neighbors
+  into regions, erases only borders that exist, and assigns each
+  region's words to all its cells. The printed layout is preserved
+  alongside as `merges` ([row, col, rowspan, colspan]) in
+  06_tables.jsonl, and `cells_to_grid` redraws it as an ASCII box grid
+  (merged cells = one box) that merged.md embeds — visually the printed
+  table. Multi-row headers (`header_rows`)
+  repeat in full in every row-group chunk; a row-span crossing a page
+  break is filled onto the continuation rows when the previous fragment
+  ends with a run (>= 2) of identical values in that column.
+- **Honest limits:** a merge covering more than ~half the table's width
+  can drop a whole grid line below the detection threshold (two rows
+  collapse); the cross-page fill heuristic can mis-fill when two
+  *identical adjacent data values* happen to end a page. Both fall
+  toward `needs_review` or a visible artifact, never silent loss.
+
+### 28. Rotated / landscape scans OCR into confident garbage
+
+- **Symptom:** a scanned page with /Rotate 90 (or a landscape scan)
+  fed Tesseract sideways text. The output — symbol soup — passed every
+  structural check and shipped as confident chunks: the exact "silent
+  garbage" failure class this pipeline promises not to have. Found live
+  on the complex sample before the fix (quality 0.50).
+- **Handling:** `handled` — two layers. (1) Triage probes every SCANNED
+  page with a cheap low-DPI OCR; below OCR_MIN_QUALITY it retries at
+  90/180/270 and applies the winning rotation in-memory
+  (`set_rotation`), so rendering, YOLO, OCR, and table crops all see
+  the page upright (0.50 → 0.97 on the sample; the fix is recorded in
+  the triage artifact and reapplied on `--from-stage` resume). (2) What
+  still scores below the threshold — stage-5 prose or a tier-2 table —
+  is flagged `needs_review`, propagated through to chunks.
 
 ---
 

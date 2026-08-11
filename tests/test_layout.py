@@ -40,8 +40,9 @@ def test_pixel_to_pdf_clamps_padded_boxes_into_page():
 
 
 def test_pixel_to_pdf_rejects_degenerate_boxes():
-    with pytest.raises(AssertionError):
-        # Entirely outside the page: clamping collapses it -> assert fires.
+    with pytest.raises(ValueError):
+        # Entirely outside the page: clamping collapses it -> raises.
+        # A real exception, not an assert: must survive `python -O`.
         pixel_rect_to_pdf(-100, -100, -50, -50, A4, 1654, 2339)
 
 
