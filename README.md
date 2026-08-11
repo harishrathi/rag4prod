@@ -36,7 +36,7 @@ recomputing — or re-paying for — earlier stages.
 | --- | --- | --- |
 | 1 | Project setup, contracts, triage | ✅ |
 | 2 | Local extraction (text, headings, figures, ruled tables) | ✅ |
-| 3 | Rendering + YOLO layout detection | ⬜ |
+| 3 | Rendering + YOLO layout detection | ✅ |
 | 4 | Gemini extraction (tables, scanned pages) | ⬜ |
 | 5 | Multi-page table stitching, assembly, chunking | ⬜ |
 | 6 | End-to-end hardening | ⬜ |

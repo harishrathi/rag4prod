@@ -94,3 +94,43 @@ FIGURE_DPI = 200
 # (see docs/design_spec.md §5).
 RULED_MIN_H_SEGMENTS = 4
 RULED_MIN_V_SEGMENTS = 4
+
+# ---------------------------------------------------------------------------
+# STAGE 3 — Rendering (rag_ingest/render.py)
+# ---------------------------------------------------------------------------
+
+# Render DPI for the vision paths. 200 is the accuracy-leaning default;
+# 150 nearly halves render time and memory. This is a REAL tuning knob:
+# the design spec (§11.1) says to benchmark table extraction at both on
+# real documents before committing a production value.
+RENDER_DPI = 200
+
+# ---------------------------------------------------------------------------
+# STAGE 4 — Layout detection (rag_ingest/layout.py)
+# ---------------------------------------------------------------------------
+
+# DocLayout-YOLO checkpoint, fetched once from Hugging Face and cached in
+# the standard HF cache (~/.cache/huggingface). ~40 MB.
+YOLO_HF_REPO = "juliozhao/DocLayout-YOLO-DocStructBench"
+YOLO_HF_FILENAME = "doclayout_yolo_docstructbench_imgsz1024.pt"
+
+# The model was fine-tuned at this input size; feeding other sizes
+# degrades accuracy (the wrapper letterboxes internally).
+YOLO_IMG_SIZE = 1024
+
+# Detections below this confidence are dropped. Low on purpose: a missed
+# table is silent data loss, a false positive costs one wasted Gemini
+# crop that comes back as prose. Errors should fall toward "wasted call".
+YOLO_CONF_THRESHOLD = 0.2
+
+# Only these DocLayNet-style labels become regions; prose/captions/etc.
+# are already covered by local extraction or the full-page Gemini pass.
+YOLO_KEEP_LABELS = ("table", "figure")
+
+# Padding added to each detection (in rendered-image pixels) before the
+# coordinate conversion, so tight boxes don't clip caption lines or the
+# last table row. Tune against real documents (design spec §11.5).
+YOLO_BOX_PAD_PX = 10
+
+# "cpu" is fine at our page counts; set "cuda" / "mps" when available.
+YOLO_DEVICE = "cpu"

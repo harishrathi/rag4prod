@@ -54,8 +54,12 @@ class Source(StrEnum):
 # A bbox is always (x0, y0, x1, y1) in PDF points (72 per inch), in the
 # page's coordinate space — NEVER in rendered-image pixels. Pixel-space
 # boxes (from YOLO) must be converted at the layout-stage boundary; no
-# pixel coordinate is allowed to escape stage 4. See layout.py (Phase 3).
-BBox = tuple[float, float, float, float]
+# pixel coordinate is allowed to escape stage 4. See layout.py.
+# PEP 695 `type` statement (3.12+): a bare `BBox = tuple[...]` assignment
+# is only an *implicit* alias, which type checkers sometimes resolve as a
+# plain variable ("BBox is not iterable" on unpacking); `type` makes the
+# alias explicit and unambiguous.
+type BBox = tuple[float, float, float, float]
 
 
 @dataclass

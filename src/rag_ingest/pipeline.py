@@ -30,11 +30,11 @@ pipeline change):
         stages/01_triage.json     # decision log: kind + evidence per page
         stages/02_units_local.jsonl   # TITLE/TEXT/FIGURE units, one per line
         stages/02_ruled_grids.json    # body font size + table-grid evidence
-        stages/03_render.json                                    [Phase 3]
-        stages/04_layout.jsonl                                   [Phase 3]
+        stages/03_render.json         # per-page render metadata + drawing keys
+        stages/04_layout.jsonl        # YOLO regions, px AND pdf boxes
         stages/05_gemini.jsonl                                   [Phase 4]
         stages/06_chunks.jsonl                                   [Phase 5]
-        debug/                    # downscaled image copies      [Phase 3+]
+        debug/renders/            # downscaled page JPEGs (what YOLO saw)
         figures/                  # full-quality stored PNGs
         merged.md                                                [Phase 5]
         manifest.json             # summary: counts, timings, review flags
@@ -50,7 +50,9 @@ from pathlib import Path
 
 import pymupdf
 
-from . import local_extract
+from . import local_extract, render
+from .config import RENDER_DPI
+from .layout import LayoutDetector
 from .models import PageKind
 from .triage import TriageRecord, triage
 
@@ -146,9 +148,44 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
             {"body_font_size": body_size, "grids": [g.to_dict() for g in grids]},
         )
 
-        # ---- STAGE 3+: added phase by phase ----------------------------
-        # (debug flag will gate the downscaled image copies from Phase 3 on)
-        _ = debug
+        # ---- STAGES 3+4: render + layout, one pass ---------------------
+        # Interleaved on purpose: rendering all pages first would hold
+        # hundreds of ~11 MB pixmaps alive. Each page renders, YOLO
+        # consumes it, the debug JPEG is cut from it, and it dies before
+        # the next page renders (see render.py module docstring).
+        detector = LayoutDetector()
+        render_meta: list[dict] = []
+        regions = []
+        t_render = t_layout = 0.0
+        for r in records:
+            page = doc.load_page(r.page)
+            if r.kind == PageKind.DRAWING:
+                key = render.store_drawing_page(page, r.page, doc_out)
+                render_meta.append({"page": r.page, "drawing_figure_key": key})
+                continue
+
+            t0 = time.perf_counter()
+            pix = render.render_page(page)
+            rgb = render.pixmap_to_rgb_array(pix)
+            t_render += time.perf_counter() - t0
+
+            t0 = time.perf_counter()
+            regions.extend(detector.detect(rgb, page.rect, r.page))
+            t_layout += time.perf_counter() - t0
+
+            render_meta.append({"page": r.page, "px_width": pix.width, "px_height": pix.height})
+            if debug:
+                render.save_debug_jpeg(page, doc_out / "debug" / "renders" / f"p{r.page:04d}.jpg")
+
+        timings["render"] = round(t_render, 3)
+        timings["layout"] = round(t_layout, 3)
+        _write_stage(doc_out, "03_render.json", {"dpi": RENDER_DPI, "pages": render_meta})
+        _write_stage_jsonl(doc_out, "04_layout.jsonl", [g.to_dict() for g in regions])
+        log.info(
+            "layout: %d region(s) across %d page(s)",
+            len(regions),
+            len({g.page for g in regions}),
+        )
 
         counts: dict[str, int] = {}
         for r in records:
@@ -165,6 +202,10 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
             "body_font_size": body_size,
             "unit_counts": unit_counts,
             "ruled_grid_pages": [g.page for g in grids],
+            "layout_regions": {
+                label: sum(1 for g in regions if g.label == label)
+                for label in {g.label for g in regions}
+            },
             "timings_secs": timings,
             # 0-based internally (see models.py); only Chunk.pages is 1-based.
             "page_kinds": {str(r.page): r.kind.value for r in records},

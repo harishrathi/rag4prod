@@ -122,4 +122,54 @@ reference this file; this file references code. Grows with each phase.
 
 ---
 
-Phases 3–6 append their sections here as they land.
+## Phase 3 — Rendering + layout detection
+
+### 11. Pixel-vs-point coordinate confusion
+
+- **Symptom:** YOLO boxes are in rendered-image pixels; PyMuPDF crops in
+  PDF points. The naive `72/DPI` constant breaks silently on rotated
+  pages and non-origin cropboxes — crops shift, nobody errors.
+- **Handling:** `handled` — one helper
+  ([layout.py](../src/rag_ingest/layout.py) `pixel_rect_to_pdf`) derives
+  scale from *actual* dimensions (`page.rect` vs pixmap size), clamps
+  into the page, and asserts non-degeneracy. Pixel coordinates never
+  leave stage 4; the stage artifact records both boxes side by side so
+  every conversion is auditable.
+
+### 12. RGB vs BGR channel order
+
+- **Symptom:** the YOLO wrapper follows OpenCV conventions — ndarray
+  input is assumed BGR. Feeding RGB swaps red/blue; for layout detection
+  the accuracy loss is small, which makes it the worst kind of bug:
+  quietly present, never crashing.
+- **Handling:** `handled` — explicit `[:, :, ::-1]` flip at the model
+  boundary, with a comment. "Mostly harmless" is not a contract.
+
+### 13. Memory at 3000 pages
+
+- **Symptom:** a 200-DPI A4 pixmap is ~11 MB raw; render-then-detect as
+  separate full passes holds gigabytes.
+- **Handling:** `handled` — stages 3 and 4 interleave in one per-page
+  loop; each pixmap dies before the next renders. The debug JPEG is a
+  separate low-res render, NOT a shrink of the pipeline pixmap: touching
+  `.samples` caches a memoryview, `shrink()` reallocates the buffer
+  under it, and PyMuPDF's destructor then warns "operation forbidden on
+  released memoryview" on every page (found live on the first full run).
+  Sharing a mutable buffer between consumers wasn't worth the few ms a
+  fresh render costs.
+
+### 14. Torch as a deployment dependency
+
+- **Symptom:** the model itself is ~40 MB but rides on a ~2.5 GB PyTorch
+  stack — container bloat, slow cold starts.
+- **Handling:** `accepted` for this repo — the framework wrapper owns
+  pre/post-processing (letterboxing, NMS, coordinate mapping), which is
+  exactly where hand-rolled bugs live.
+- **Production note:** export to ONNX and run under `onnxruntime`
+  (~50 MB) once behavior is pinned by tests; that also unlocks
+  quantization. Standard sequencing: correctness on the framework first,
+  ONNX as a deployment optimization second.
+
+---
+
+Phases 4–6 append their sections here as they land.

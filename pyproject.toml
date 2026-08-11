@@ -11,7 +11,10 @@ license = "MIT"
 authors = [{ name = "Harish Rathi" }]
 requires-python = ">=3.12"
 dependencies = [
-    "pymupdf==1.28.2",   # Phase 1+: triage, extraction, rendering
+    "pymupdf==1.28.2",         # Phase 1+: triage, extraction, rendering
+    "doclayout-yolo==0.0.4",   # Phase 3: layout detection (pulls torch)
+    "huggingface-hub==1.27.0", # Phase 3: model weights download + cache
+    "numpy==2.5.2",            # Phase 3: pixmap -> model input arrays
 ]
 
 [project.optional-dependencies]
