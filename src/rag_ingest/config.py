@@ -150,3 +150,28 @@ TESSDATA_URL = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.trai
 # OCR render resolution. 300 DPI is Tesseract's canonical sweet spot:
 # below ~250 accuracy drops off; above ~350 costs time for no gain.
 OCR_DPI = 300
+
+# ---------------------------------------------------------------------------
+# STAGE 6 — Tables (rag_ingest/tables.py)
+# ---------------------------------------------------------------------------
+
+# Tier-2 grid detection on scanned tables: a pixel row/column counts as a
+# grid line when at least this fraction of its pixels are "ink" (darker
+# than GRID_DARK_THRESHOLD on a 0-255 gray scale). 0.5 tolerates broken /
+# skewed rules while rejecting rows of dense text, which rarely exceed
+# ~40% coverage in a single pixel row.
+GRID_LINE_MIN_COVERAGE = 0.5
+GRID_DARK_THRESHOLD = 128
+
+# Multi-page continuation: table on page N is a continuation CANDIDATE
+# into page N+1 when its bbox bottom reaches below BOTTOM_FRAC of the
+# page height AND page N+1 has a table starting above TOP_FRAC. Both
+# checks are cheap geometry; the column-count match does the real work.
+TABLE_CONT_BOTTOM_FRAC = 0.90
+TABLE_CONT_TOP_FRAC = 0.12
+
+# A continuation page often repeats the header row. Rows are compared
+# after whitespace normalization with a similarity ratio (not equality:
+# tier-2 cells carry OCR noise). Above this ratio -> treated as a
+# repeated header and dropped from the continuation fragment.
+HEADER_MATCH_RATIO = 0.8

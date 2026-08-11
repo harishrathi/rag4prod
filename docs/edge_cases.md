@@ -231,4 +231,43 @@ reference this file; this file references code. Grows with each phase.
 
 ---
 
-Phases 5–6 append their sections here as they land.
+## Phase 5 — Tables
+
+### 19. Tesseract silently drops text inside ruled cells
+
+- **Symptom:** full-page OCR of a scanned page containing a ruled table
+  returned only the heading above the table — every cell was skipped.
+  Tesseract's layout analysis treats tightly ruled regions as non-text.
+  No error, no warning: the words simply don't exist in the output.
+- **Handling:** `handled` — tier 2 erases the grid lines before OCR
+  (line-removal preprocessing, the standard OCR-pipeline fix). We get it
+  nearly free: grid detection has already located every line, so tier 2
+  erases a ±2 px band per line, OCRs the cleaned crop, and re-anchors
+  the words into cells using the kept grid geometry
+  ([tables.py](../src/rag_ingest/tables.py) `extract_scanned_table`).
+
+### 20. The wrapper PDF's coordinate scale — the stage-4 lesson, again
+
+- **Symptom:** words OCR'd from the cleaned crop landed in the wrong
+  cells: the code assumed `pdfocr_tobytes`'s page uses 1 px = 1 pt. It
+  doesn't — pdfocr picks its own page scale. Every trusted-constant
+  assumption about coordinate systems eventually breaks.
+- **Handling:** `handled` — scale derived from actual dimensions
+  (pixmap size vs OCR page rect), exactly like stage 4's
+  `pixel_rect_to_pdf`. Second occurrence of the same bug class in one
+  codebase; the rule generalizes: *at every boundary between coordinate
+  systems, measure — never assume.*
+
+### 21. Column mismatch across a page boundary
+
+- **Symptom:** a table fragment on page N+1 whose column count differs
+  from page N's may be a continuation with a merged/split column — or a
+  different table entirely. Merging on a guess corrupts both.
+- **Handling:** `handled` (by refusing) — stitching requires equal column
+  counts; mismatches stay separate fragments and fail validation into
+  `needs_review` with stored crops. Guessing at structure is how silent
+  corruption happens; a human resolves the ambiguity.
+
+---
+
+Phase 6 appends its section here when it lands.

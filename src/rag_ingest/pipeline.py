@@ -33,7 +33,7 @@ pipeline change):
         stages/03_render.json         # per-page render metadata + drawing keys
         stages/04_layout.jsonl        # YOLO regions, px AND pdf boxes
         stages/05_ocr_units.jsonl     # scanned-page units via Tesseract
-        stages/06_tables.jsonl                                   [Phase 5]
+        stages/06_tables.jsonl        # tiered ladder results + stitching
         stages/07_chunks.jsonl                                   [Phase 6]
         debug/renders/            # downscaled page JPEGs (what YOLO saw)
         figures/                  # full-quality stored PNGs
@@ -51,7 +51,7 @@ from pathlib import Path
 
 import pymupdf
 
-from . import local_extract, ocr, render
+from . import local_extract, ocr, render, tables
 from .config import FIGURE_DPI, RENDER_DPI
 from .layout import LayoutDetector
 from .models import PageKind, Source, Unit, UnitType
@@ -196,10 +196,15 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
         # helper is what makes these crops land on the right pixels.
         t0 = time.perf_counter()
         ocr_units: list[Unit] = []
+        textpages: dict[int, pymupdf.TextPage] = {}  # shared with stage 6 — OCR once
         for r in records:
             if r.kind != PageKind.SCANNED:
                 continue
-            ocr_units.extend(ocr.ocr_page_units(doc.load_page(r.page), r.page, doc_out / "figures"))
+            page = doc.load_page(r.page)
+            textpages[r.page] = ocr.get_ocr_textpage(page)
+            ocr_units.extend(
+                ocr.ocr_page_units(page, r.page, doc_out / "figures", textpage=textpages[r.page])
+            )
         for g in regions:
             if g.label != "figure" or page_kinds.get(g.page) != PageKind.SCANNED:
                 continue
@@ -219,6 +224,41 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
         timings["ocr"] = round(time.perf_counter() - t0, 3)
         _write_stage_jsonl(doc_out, "05_ocr_units.jsonl", [u.to_dict() for u in ocr_units])
 
+        # ---- STAGE 6: tables — tiered ladder + stitching ---------------
+        t0 = time.perf_counter()
+        raw_tables: list[tables.RawTable] = []
+        # Tier 1: every text-native page through find_tables (vector grid
+        # + exact text). Runs page-wide, not per YOLO region — the lines
+        # are authoritative where they exist.
+        for r in records:
+            if r.kind == PageKind.TEXT_NATIVE:
+                raw_tables.extend(tables.extract_native_tables(doc.load_page(r.page), r.page))
+        # Tier 2: scanned-page YOLO table regions -> pixel grid, line
+        # removal, then a dedicated OCR pass on the cleaned crop (the
+        # stage-5 full-page OCR is unusable here: Tesseract drops text
+        # inside ruled cells — see tables.extract_scanned_table).
+        for g in regions:
+            if g.label == "table" and page_kinds.get(g.page) == PageKind.SCANNED:
+                raw_tables.append(
+                    tables.extract_scanned_table(doc.load_page(g.page), g.page, g.bbox_pdf)
+                )
+        # Cross-check: a YOLO table on a NATIVE page that find_tables did
+        # not see is a borderless-table suspect -> review item, not a miss.
+        for g in regions:
+            if g.label != "table" or page_kinds.get(g.page) != PageKind.TEXT_NATIVE:
+                continue
+            if not any(
+                t.page == g.page and tables.overlap_frac(t.bbox, g.bbox_pdf) > 0.3
+                for t in raw_tables
+            ):
+                raw_tables.append(
+                    tables.RawTable(page=g.page, bbox=g.bbox_pdf, cells=[], source="yolo_only")
+                )
+        page_heights = {r.page: doc.load_page(r.page).rect.height for r in records}
+        table_results = tables.finalize(raw_tables, page_heights, doc, doc_out)
+        timings["tables"] = round(time.perf_counter() - t0, 3)
+        _write_stage_jsonl(doc_out, "06_tables.jsonl", [t.to_dict() for t in table_results])
+
         counts: dict[str, int] = {}
         for r in records:
             counts[r.kind.value] = counts.get(r.kind.value, 0) + 1
@@ -234,6 +274,11 @@ def run(pdf_path: Path, out_dir: Path, from_stage: int = 1, debug: bool = True) 
             "body_font_size": body_size,
             "unit_counts": unit_counts,
             "ruled_grid_pages": [g.page for g in grids],
+            "tables": {
+                "count": len(table_results),
+                "multi_page": [t.table_id for t in table_results if len(t.pages) > 1],
+                "needs_review": [t.table_id for t in table_results if t.needs_review],
+            },
             "layout_regions": {
                 label: sum(1 for g in regions if g.label == label)
                 for label in {g.label for g in regions}

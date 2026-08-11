@@ -53,7 +53,20 @@ def ensure_tessdata() -> str:
     return str(td)
 
 
-def ocr_page_units(page: pymupdf.Page, page_index: int, figures_dir: Path) -> list[Unit]:
+def get_ocr_textpage(page: pymupdf.Page) -> pymupdf.TextPage:
+    """One OCR pass per scanned page, shared by stages 5 AND 6: the same
+    textpage that yields prose units also supplies the words that fill
+    table cells (tables.extract_scanned_table). OCR is the most expensive
+    local operation — never run it twice on one page."""
+    return page.get_textpage_ocr(dpi=OCR_DPI, full=True, tessdata=ensure_tessdata())
+
+
+def ocr_page_units(
+    page: pymupdf.Page,
+    page_index: int,
+    figures_dir: Path,
+    textpage: pymupdf.TextPage | None = None,
+) -> list[Unit]:
     """OCR one scanned page and run the standard extraction walk on it.
 
     full=True OCRs the entire page as one image (right for scanned pages,
@@ -65,7 +78,8 @@ def ocr_page_units(page: pymupdf.Page, page_index: int, figures_dir: Path) -> li
     distribution, not the document-wide native body size — OCR-synthesized
     sizes and native sizes are different measurement systems (ledger #17).
     """
-    textpage = page.get_textpage_ocr(dpi=OCR_DPI, full=True, tessdata=ensure_tessdata())
+    if textpage is None:
+        textpage = get_ocr_textpage(page)
     body_size = page_body_font_size(page, textpage)
     return extract_page(
         page,

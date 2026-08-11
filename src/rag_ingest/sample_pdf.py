@@ -20,7 +20,11 @@ Page map (0-based) and the triage branch each page exists to exercise:
     4  dense vector line-work, no text -> DRAWING      (CAD-plan stand-in)
     5  title page, ~15 chars of text   -> SCANNED      (accepted misroute: costs
                                           one vision-API call, output still fine)
-    6  ruled table + prose             -> TEXT_NATIVE  (table extraction, Phase 2/3)
+    6  ruled table + prose             -> TEXT_NATIVE  (table tier 1, find_tables)
+    7  ruled table as pixels, no text  -> SCANNED      (table tier 2: image grid
+                                          detection + per-cell OCR)
+    8  table into the bottom margin    -> TEXT_NATIVE  (multi-page stitching:
+    9  continuation + repeated header  -> TEXT_NATIVE   detect, merge, drop header)
 """
 
 from __future__ import annotations
@@ -42,6 +46,9 @@ EXPECTED_KINDS: dict[int, PageKind] = {
     4: PageKind.DRAWING,
     5: PageKind.SCANNED,
     6: PageKind.TEXT_NATIVE,
+    7: PageKind.SCANNED,  # ruled table as pixels only (tier-2 case)
+    8: PageKind.TEXT_NATIVE,  # table running into the bottom margin ...
+    9: PageKind.TEXT_NATIVE,  # ... continuing at the top, repeated header
 }
 
 # Contract-clause-flavoured filler: gives later phases realistic prose with
@@ -136,21 +143,41 @@ def _title_page(doc: pymupdf.Document) -> None:
     page.insert_text((200, 400), "DOCUMENT No. 42", fontsize=24, fontname="hebo")
 
 
-def _table_page(doc: pymupdf.Document) -> None:
-    """Prose above a ruled 4x3 table — text-native, with real grid lines."""
-    page = doc.new_page(width=PAGE_W, height=PAGE_H)
-    page.insert_text((72, 72), "5. Price Schedule (extract)", fontsize=14, fontname="hebo")
-    page.insert_textbox(
-        pymupdf.Rect(72, 100, PAGE_W - 72, 180), LOREM * 2, fontsize=10, fontname="helv"
-    )
+HEADER_ROW = ["Item", "Description", "Rate"]
+PRICE_ROWS = [
+    ["1", "Excavation", "120.00"],
+    ["2", "Concrete M25", "5400.00"],
+    ["3", "Steel reinforcement", "62.50"],
+]
+# Rows for the multi-page table (pages 8-9): header + 6 rows on page 8,
+# repeated header + 4 rows on page 9. Ground truth for stitching tests.
+CONT_ROWS_P8 = [
+    ["4", "Formwork", "310.00"],
+    ["5", "Brickwork", "95.00"],
+    ["6", "Plastering", "48.00"],
+    ["7", "Flooring", "260.00"],
+    ["8", "Painting", "35.00"],
+    ["9", "Waterproofing", "410.00"],
+]
+CONT_ROWS_P9 = [
+    ["10", "Roofing", "520.00"],
+    ["11", "Glazing", "180.00"],
+    ["12", "Joinery", "225.00"],
+    ["13", "Drainage", "140.00"],
+]
 
-    x0, y0, col_w, row_h, cols, rows = 72.0, 220.0, 150.0, 28.0, 3, 4
-    cells = [
-        ["Item", "Description", "Rate"],
-        ["1", "Excavation", "120.00"],
-        ["2", "Concrete M25", "5400.00"],
-        ["3", "Steel reinforcement", "62.50"],
-    ]
+
+def _draw_ruled_table(
+    page: pymupdf.Page,
+    cells: list[list[str]],
+    y0: float,
+    x0: float = 72.0,
+    col_w: float = 150.0,
+    row_h: float = 28.0,
+    fontsize: float = 9,
+) -> None:
+    """Draw a fully ruled table with text in each cell."""
+    rows, cols = len(cells), len(cells[0])
     shape = page.new_shape()
     for r in range(rows + 1):
         shape.draw_line(
@@ -165,8 +192,54 @@ def _table_page(doc: pymupdf.Document) -> None:
     for r, row in enumerate(cells):
         for c, cell in enumerate(row):
             page.insert_text(
-                (x0 + c * col_w + 6, y0 + r * row_h + 18), cell, fontsize=9, fontname="helv"
+                (x0 + c * col_w + 6, y0 + r * row_h + 18), cell, fontsize=fontsize, fontname="helv"
             )
+
+
+def _table_page(doc: pymupdf.Document) -> None:
+    """Prose above a ruled 4x3 table — text-native, with real grid lines."""
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page.insert_text((72, 72), "5. Price Schedule (extract)", fontsize=14, fontname="hebo")
+    page.insert_textbox(
+        pymupdf.Rect(72, 100, PAGE_W - 72, 180), LOREM * 2, fontsize=10, fontname="helv"
+    )
+    _draw_ruled_table(page, [HEADER_ROW, *PRICE_ROWS], y0=220.0)
+
+
+def _scanned_table_page(doc: pymupdf.Document) -> None:
+    """A ruled table that exists only as pixels — the tier-2 case: no
+    vector lines for find_tables, no text layer; the grid must be found
+    in the image and the cells read by OCR."""
+    tmp = pymupdf.open()
+    p = tmp.new_page(width=PAGE_W, height=PAGE_H)
+    p.insert_text((72, 90), "5.2 Price Schedule (scanned annex)", fontsize=15, fontname="hebo")
+    _draw_ruled_table(p, [HEADER_ROW, *PRICE_ROWS], y0=160.0, fontsize=11)
+    png = p.get_pixmap(dpi=200).tobytes("png")
+    tmp.close()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page.insert_image(pymupdf.Rect(0, 0, PAGE_W, PAGE_H), stream=png)
+
+
+def _continuation_pages(doc: pymupdf.Document) -> None:
+    """A table split across two pages: runs into the bottom margin of the
+    first page and resumes at the top of the next WITH a repeated header —
+    the exact shape multi-page stitching must detect and merge."""
+    p8 = doc.new_page(width=PAGE_W, height=PAGE_H)
+    p8.insert_text((72, 72), "6. Rate Schedule (full)", fontsize=14, fontname="hebo")
+    p8.insert_textbox(
+        pymupdf.Rect(72, 100, PAGE_W - 72, 560), LOREM * 4, fontsize=10, fontname="helv"
+    )
+    # 7 rows x 28pt from y=600 -> bottom edge 796 > 842*0.90=758: lands in
+    # the bottom margin zone, which is continuation signal #1.
+    _draw_ruled_table(p8, [HEADER_ROW, *CONT_ROWS_P8], y0=600.0)
+
+    p9 = doc.new_page(width=PAGE_W, height=PAGE_H)
+    # Continuation starts at y=72 < 842*0.12=101: signal #2. First row
+    # repeats the header — stitching must drop it, not duplicate it.
+    _draw_ruled_table(p9, [HEADER_ROW, *CONT_ROWS_P9], y0=72.0)
+    p9.insert_textbox(
+        pymupdf.Rect(72, 260, PAGE_W - 72, 420), LOREM * 2, fontsize=10, fontname="helv"
+    )
 
 
 def build_sample(path: Path) -> Path:
@@ -181,6 +254,8 @@ def build_sample(path: Path) -> Path:
     _drawing_page(doc)  # p4
     _title_page(doc)  # p5
     _table_page(doc)  # p6
+    _scanned_table_page(doc)  # p7
+    _continuation_pages(doc)  # p8 + p9
     assert doc.page_count == len(EXPECTED_KINDS)
     doc.save(path)
     doc.close()

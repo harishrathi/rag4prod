@@ -65,8 +65,10 @@ def test_embedded_figure_stored_with_storage_key(extracted):
     assert stored.exists() and stored.stat().st_size > 0
 
 
-def test_ruled_grid_on_exactly_the_table_page(extracted):
-    assert [g.page for g in extracted["grids"]] == [6]
-    grid = extracted["grids"][0]
-    assert grid.h_segments == 5  # 4 rows -> 5 horizontal rules
-    assert grid.v_segments == 4  # 3 cols -> 4 vertical rules
+def test_ruled_grids_on_exactly_the_table_pages(extracted):
+    # Pages 6, 8, 9 draw ruled tables; the drawing page (4) is not
+    # TEXT_NATIVE so stage 2 never sees its line-work.
+    assert [g.page for g in extracted["grids"]] == [6, 8, 9]
+    grid6 = extracted["grids"][0]
+    assert grid6.h_segments == 5  # 4 rows -> 5 horizontal rules
+    assert grid6.v_segments == 4  # 3 cols -> 4 vertical rules
