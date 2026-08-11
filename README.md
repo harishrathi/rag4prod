@@ -8,12 +8,15 @@ either handled or consciously accepted in
 [docs/edge_cases.md](docs/edge_cases.md).
 
 **Stack:** [PyMuPDF](https://pymupdf.readthedocs.io/) (triage, local
-extraction, rendering, bundled Tesseract OCR) + DocLayout-YOLO (layout
-detection) — **fully local, no API keys**. Full architecture and the
-reasoning behind every design decision, including why the original
-vision-LLM tier was dropped: [docs/design_spec.md](docs/design_spec.md).
-What a clean-room v2 would look like now that all 30 edge cases are known —
-the patches distilled back into an architecture:
+extraction, rendering) + DocLayout-YOLO (layout detection) + a
+Gemini-class VLM for the **paid lane** — only pages the free lane cannot
+read honestly (true scans, broken font encodings) ever cost an API call.
+Full architecture and the reasoning behind every design decision:
+[docs/design_spec.md](docs/design_spec.md); why Tesseract was replaced
+by one VLM code path for every script:
+[docs/gemini_extractor_spec.md](docs/gemini_extractor_spec.md).
+The clean-room v2 built from all 30 ledgered edge cases — the patches
+distilled back into an architecture — is implemented as `rag_ingest2`:
 [docs/rewrite_design.md](docs/rewrite_design.md).
 
 ## Pipeline
@@ -21,7 +24,7 @@ the patches distilled back into an architecture:
 ```text
 PDF ──1 triage──▶ page kinds ──2 local extract──▶ units (free, exact)
         │
-        └─▶ 3 render ──▶ 4 layout (YOLO) ──▶ 5 OCR (Tesseract) ──▶ units
+        └─▶ 3 render ──▶ 4 layout (YOLO) ──▶ 5 VLM lane (paid) ──▶ units
                               │                                      │
                               └──▶ 6 tables (tiered ladder) ──▶ units│
                                                                      │
@@ -42,11 +45,13 @@ recomputing — or re-paying for — earlier stages.
 | 1 | Project setup, contracts, triage | ✅ |
 | 2 | Local extraction (text, headings, figures, ruled tables) | ✅ |
 | 3 | Rendering + YOLO layout detection | ✅ |
-| 4 | OCR for scanned pages (bundled Tesseract) | ✅ |
+| 4 | OCR for scanned pages (bundled Tesseract; later replaced by the VLM lane) | ✅ |
 | 5 | Tiered table extraction + multi-page stitching | ✅ |
 | 6 | Assembly, dedup, chunking | ✅ |
 | 7 | Complex tables (merged cells, spans → JSON + ASCII grid), OCR quality gate + orientation recovery, real `--from-stage` resume, clean rejection | ✅ |
-| 8 | Real-corpus hardening: broken text layers → multilingual OCR reroute, repeating header/footer suppression | ✅ |
+| 8 | Real-corpus hardening: broken text layers → reroute, repeating header/footer suppression | ✅ |
+| 9 | Gemini VLM lane: one paid code path for every script, mojibake triage, response cache, verification gate | ✅ |
+| 10 | v2 rewrite (`rag_ingest2`): eight layers, typed coordinates, process-parallel workers, one quality gate | ✅ |
 
 ## Setup
 
@@ -64,9 +69,14 @@ pip install -e ".[dev]"
 python -m rag_ingest.sample_pdf
 python -m rag_ingest.complex_pdf
 
-# run the pipeline
+# the paid lane needs a key (env var, or a gitignored .env at the repo
+# root with GEMINI_API_KEY=...); the free lane runs without one
 rag-ingest sample_data/sample_doc.pdf
 rag-ingest sample_data/complex_doc.pdf
+
+# the v2 pipeline (same documents, eight-layer architecture; --vlm-cache
+# can point at a v1 cache so re-runs cost nothing)
+rag-ingest2 sample_data/sample_doc.pdf
 
 # inspect what happened, stage by stage
 cat output/sample_doc/stages/01_triage.json

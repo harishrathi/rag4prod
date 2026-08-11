@@ -176,6 +176,12 @@ reference this file; this file references code. Grows with each phase.
 
 ## Phase 4 — OCR (scanned pages)
 
+> **Engine note (2026-08-11):** Tesseract was later deleted entirely —
+> stage 5 is now the VLM lane
+> ([gemini_extractor_spec.md](gemini_extractor_spec.md)). Entries 15-17
+> are kept as the record of what the OCR era taught; per-entry notes
+> mark what each lesson became.
+
 ### 15. Tesseract deployment: bundled vs system vs Docker
 
 - **Symptom:** OCR engines are system binaries; "pip install" doesn't
@@ -189,6 +195,9 @@ reference this file; this file references code. Grows with each phase.
   (e.g. hertzg/tesseract-server) gives OCR its own CPU pool and
   independent scaling — at the cost of an HTTP hop and rebuilding the
   block/line mapping from hOCR/TSV yourself.
+- **Superseded (VLM lane):** engine and tessdata deleted; the deployment
+  question became an API-client question (retries, response cache,
+  `GEMINI_API_KEY`).
 
 ### 16. OCR confidence and scan-resolution limits
 
@@ -206,6 +215,12 @@ reference this file; this file references code. Grows with each phase.
   exposes per-word confidence — filter below ~60 and flag the page
   `needs_review`. That is the right tool against stamps/handwriting;
   a "better engine" is not.
+- **Superseded (VLM lane):** `ocr_quality_score` deleted with its
+  engine. Its philosophy survived: VLMs fail as *fluent lies*, so the
+  replacement gate checks repetition loops, two-sided length sanity,
+  mojibake echo, and YOLO-vs-markdown omission instead of symbol soup
+  (gemini_extractor_spec.md §5). Genuinely illegible regions come back
+  as the literal `[ILLEGIBLE]` token, flagged per unit.
 
 ### 17. OCR textpages emit words as separate spans
 
@@ -232,6 +247,15 @@ reference this file; this file references code. Grows with each phase.
 - **Production note:** if borderless tables ever appear in the corpus,
   the tier-3 slot is where a VLM plugs back in — the validation gate
   that would route to it already exists.
+- **Reversed on real data (2026-08-11):** the real bilingual corpus
+  broke both premises — text layers that LIE (case 29) and Devanagari
+  scans Tesseract misread — so the VLM came back, not as tier 3 but as
+  the whole stage 5 ([gemini_extractor_spec.md](gemini_extractor_spec.md)).
+  The hallucination argument was answered rather than dismissed: a
+  verification gate treats fluent-lie failure modes explicitly, and the
+  fallback tier is STILL a human (`needs_review` + crop). The full
+  circle — LLM dropped, then re-adopted narrower and better-guarded — is
+  the most instructive arc in this ledger.
 
 ---
 
@@ -243,12 +267,15 @@ reference this file; this file references code. Grows with each phase.
   returned only the heading above the table — every cell was skipped.
   Tesseract's layout analysis treats tightly ruled regions as non-text.
   No error, no warning: the words simply don't exist in the output.
-- **Handling:** `handled` — tier 2 erases the grid lines before OCR
-  (line-removal preprocessing, the standard OCR-pipeline fix). We get it
-  nearly free: grid detection has already located every line, so tier 2
-  erases a ±2 px band per line, OCRs the cleaned crop, and re-anchors
-  the words into cells using the kept grid geometry
-  ([tables.py](../src/rag_ingest/tables.py) `extract_scanned_table`).
+- **Handling:** `handled` — tier 2 erased the grid lines before OCR
+  (line-removal preprocessing, the standard OCR-pipeline fix): grid
+  detection had already located every line, so tier 2 erased a ±2 px
+  band per line, OCR'd the cleaned crop, and re-anchored the words into
+  cells using the kept grid geometry.
+- **Superseded (VLM lane):** tier 2 deleted with its engine — the VLM
+  returns scanned-page tables inline as markdown, ruled cells included.
+  The lesson stands as the reason a symbol-level engine needed pixel
+  surgery that a page-level model does not.
 
 ### 20. The wrapper PDF's coordinate scale — the stage-4 lesson, again
 
@@ -412,6 +439,11 @@ a rotated scan, and a 31-row schedule vs row-group chunking.
   text can read enough junk "words" to take the early exit; Tesseract's
   real OSD (not exposed by the bundled integration) is the production
   answer.
+- **Superseded (VLM lane):** the orientation probe was deleted with its
+  engine — the VLM reads rotated pages directly, so there is nothing to
+  probe and no in-memory rotation to reapply on resume. If corpus
+  evidence ever disagrees, rotate via a cheap render-time check, never
+  by OCR probing (gemini_extractor_spec.md §6).
 
 ---
 
@@ -434,17 +466,18 @@ invisible in logs, obvious in output.
 - **Handling:** `handled` — three layers. (1) Triage counts junk chars
   (C0 controls, U+FFFD, Private Use Area — healthy text layers contain
   ZERO, measured; broken pages carry 20-451): past either threshold the
-  page reroutes to the OCR path, where Tesseract reads the rendered
-  glyphs the text layer couldn't express. (2) OCR runs multilingual
-  (`OCR_LANGUAGES = "eng+hin"`, per-language tessdata auto-download) —
-  OCRing these pages in English only would re-lose the same text.
-  (3) Mostly-clean pages that stay native get a unit-level net: any
-  unit still containing junk chars is flagged `needs_review`, and a
-  tier-1 table with junk in its cells flags the same way. (4) Rerouted
-  pages are vector-crisp, so page borders sit millimeters from table
-  borders and the pixel grid reads the gap as empty rows/columns —
-  `drop_empty_lines` removes all-empty lines (merges remapped) before
-  validation, restoring the true table shape.
+  page reroutes away from local extraction and is re-read from pixels.
+  (2) Originally the reroute target was multilingual Tesseract; it is
+  now the VLM lane, which also added a second, script-agnostic detector
+  for the OTHER CMap symptom — printable mojibake (orphan combining
+  marks, ASCII symbols inside non-Latin words) that carries zero junk
+  chars and sailed through this entry's original fix
+  (gemini_extractor_spec.md §3; calibrated: healthy pages score exactly
+  0, broken pages 10-20). (3) Mostly-clean pages that stay native get a
+  unit-level net: any unit still containing junk chars or orphan marks
+  is flagged `needs_review`, and a tier-1 table with junk in its cells
+  flags the same way. (The tier-2 `drop_empty_lines` gutter fix this
+  entry once included died with tier 2.)
 - **Scoring lesson (found live by a test):** `str.isalpha()` rejects
   most real Hindi — Indic vowels are COMBINING MARKS (बंद carries
   U+0902, category Mn), not letters. The quality scorer counts

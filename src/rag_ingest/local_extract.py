@@ -107,26 +107,6 @@ def estimate_body_font_size(doc: pymupdf.Document, text_pages: list[int]) -> flo
     return body
 
 
-def page_body_font_size(page: pymupdf.Page, textpage: pymupdf.TextPage) -> float:
-    """Character-weighted body size for ONE page's textpage.
-
-    Exists for the OCR path: OCR-synthesized span sizes are not
-    comparable to native-text sizes (a 12pt print OCRs to ~11.9pt while
-    the native body measures 10pt), so judging OCR lines against the
-    document-wide native body size misclassifies ordinary prose as
-    headings. Each OCR page is judged against its own size distribution.
-    """
-    chars_per_size: Counter[int] = Counter()
-    d = cast(dict, page.get_text("dict", textpage=textpage))
-    for block in d["blocks"]:
-        if block["type"] != 0:
-            continue
-        for line in block["lines"]:
-            for span in line["spans"]:
-                chars_per_size[round(span["size"])] += len(span["text"].strip())
-    return float(chars_per_size.most_common(1)[0][0]) if chars_per_size else 10.0
-
-
 # ---------------------------------------------------------------------------
 # Per-page extraction
 # ---------------------------------------------------------------------------
@@ -170,13 +150,12 @@ def extract_page(
 ) -> list[Unit]:
     """One page -> TITLE/TEXT/FIGURE units in top-to-bottom order.
 
-    The ``textpage`` seam is what lets stage 5 reuse this walk unchanged:
-    an OCR textpage (get_textpage_ocr) has the same block/line/span shape
-    as a native one, so scanned pages flow through the exact same
-    classification and paragraph-merging logic — only ``source`` differs.
-    OCR callers pass include_figures=False: on a scanned page the "image
-    block" is the page-sized scan itself, which must not be re-stored as
-    a figure (real figure regions come from YOLO instead).
+    The ``textpage`` seam let the deleted Tesseract stage reuse this walk
+    on OCR textpages (same block/line/span shape); it stays because it is
+    the generic "walk any textpage" entry point and costs nothing.
+    Callers whose textpage covers the whole page as one image pass
+    include_figures=False so the page-sized image block is not re-stored
+    as a figure.
     """
     units: list[Unit] = []
     fig_index = 0

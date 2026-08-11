@@ -1,7 +1,6 @@
 .venv/
 .env
 output/
-.tessdata/
 __pycache__/
 *.egg-info/
 .pytest_cache/

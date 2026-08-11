@@ -179,16 +179,14 @@ def triage_page(page: pymupdf.Page, page_index: int) -> TriageRecord:
     )
 
 
-def triage(doc: pymupdf.Document, fix_orientation: bool = True) -> list[TriageRecord]:
+def triage(doc: pymupdf.Document) -> list[TriageRecord]:
     """Classify every page of an open document.
 
-    SCANNED pages additionally get an orientation probe (ledger #28): a
-    landscape/rotated scan OCRs into garbage in every later stage, and
-    triage is the last point where fixing it is cheap — one in-memory
-    ``set_rotation`` here and rendering, YOLO, OCR, and table crops all
-    see the page upright. The probe costs one low-DPI OCR per healthy
-    scanned page; ``fix_orientation=False`` skips it for callers that
-    only need the classification.
+    The v1 orientation probe (ledger #28) is gone with its OCR engine:
+    the VLM reads rotated pages directly. ``rotation_applied`` stays on
+    TriageRecord so old artifacts still rehydrate; new runs never set it.
+    If corpus evidence ever disagrees, rotate via a cheap render-time
+    check — never by OCR probing (gemini_extractor_spec.md §6).
 
     Deliberately single-threaded; see the module docstring for why a
     thread pool would be a bug here.
@@ -198,26 +196,6 @@ def triage(doc: pymupdf.Document, fix_orientation: bool = True) -> list[TriageRe
     # slices), load_page is typed -> Page — and the index is needed for
     # the record anyway.
     records = [triage_page(doc.load_page(i), i) for i in range(doc.page_count)]
-
-    if fix_orientation:
-        from .ocr import detect_orientation  # deferred: pulls numpy + tessdata
-
-        for r in records:
-            if r.kind != PageKind.SCANNED:
-                continue
-            page = doc.load_page(r.page)
-            delta, before, after = detect_orientation(page)
-            if delta:
-                page.set_rotation((page.rotation + delta) % 360)
-                r.rotation_applied = delta
-                r.reason += f"; rotated {delta} deg (real words {before} -> {after})"
-                log.info(
-                    "p%04d: orientation fixed by %d deg (real words %d -> %d)",
-                    r.page,
-                    delta,
-                    before,
-                    after,
-                )
 
     counts: dict[str, int] = {}
     for r in records:

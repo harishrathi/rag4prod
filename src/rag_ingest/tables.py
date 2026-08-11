@@ -8,23 +8,20 @@ silently.
           PyMuPDF find_tables(): vector grid lines + exact native text.
           Zero OCR, zero inference — cannot hallucinate.
 
-  Tier 2  bordered table, SCANNED page
-          The grid exists only as pixels: detect line rows/columns by ink
-          coverage in the rendered crop, intersect into cells, then fill
-          cells with the words the stage-5 OCR textpage already produced
-          (no re-OCR — words are assigned to cells by center containment).
+  Paid lane  any table on a SCANNED/rerouted page
+          Arrives from stage 5 as GFM markdown inside the page's VLM
+          response; pipeline.py parses it to cells and feeds it through
+          the SAME stitching/validation path (source="gemini").
 
   Fallback  anything failing validation
           needs_review=true + a stored crop PNG. The reviewer is a HUMAN.
-          This slot is where a VLM tier would plug in if the corpus ever
-          grows borderless tables (spec §7 records why it was dropped).
 
 Multi-page stitching: a table that runs into the bottom margin of page N
 and resumes at the top of page N+1 with the same column count is ONE
 table. Repeated headers on the continuation are dropped (fuzzy match —
-tier-2 rows carry OCR noise). A column-count mismatch REFUSES to merge
-and flags both fragments: guessing at structure is how silent corruption
-happens.
+paid-lane rows can carry transcription noise). A column-count mismatch
+REFUSES to merge and flags both fragments: guessing at structure is how
+silent corruption happens.
 """
 
 from __future__ import annotations
@@ -33,20 +30,13 @@ import logging
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import cast
 
-import numpy as np
 import pymupdf
 
 from .config import (
     FIGURE_DPI,
     FURNITURE_MIN_REPEATS,
-    GRID_DARK_THRESHOLD,
-    GRID_LINE_MIN_COVERAGE,
     HEADER_MATCH_RATIO,
-    OCR_LANGUAGES,
-    OCR_MIN_QUALITY,
-    RENDER_DPI,
     TABLE_CONT_BOTTOM_FRAC,
     TABLE_CONT_TOP_FRAC,
 )
@@ -196,224 +186,10 @@ def extract_native_tables(page: pymupdf.Page, page_index: int) -> list[RawTable]
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 — bordered, scanned: pixel grid + OCR word assignment
+# (Tier 2 — the pixel-grid + Tesseract path — was deleted with its engine:
+# scanned-page tables now arrive from the VLM lane as markdown. See
+# docs/gemini_extractor_spec.md §6.)
 # ---------------------------------------------------------------------------
-
-
-def _line_centers(mask: np.ndarray) -> list[float]:
-    """Centers of consecutive True runs — a 2-3 px thick grid line becomes
-    one center instead of 2-3 separate 'lines'."""
-    centers: list[float] = []
-    start: int | None = None
-    for i, v in enumerate(mask):
-        if v and start is None:
-            start = i
-        elif not v and start is not None:
-            centers.append((start + i - 1) / 2)
-            start = None
-    if start is not None:
-        centers.append((start + len(mask) - 1) / 2)
-    return centers
-
-
-def drop_empty_lines(
-    cells: list[list[str]], merges: list[list[int]], header_rows: int
-) -> tuple[list[list[str]], list[list[int]], int]:
-    """Remove all-empty rows/columns from a grid-OCR matrix (ledger #29).
-
-    Vector-crisp pages rerouted to the OCR path (broken text layers)
-    have page borders and table borders millimeters apart — the pixel
-    grid reads the space between them as extra rows/columns of nothing.
-    An all-empty line carries no information, so dropping it is safe;
-    merges are remapped (and clipped) onto the kept indices."""
-    if not cells:
-        return cells, merges, header_rows
-    keep_r = [i for i, row in enumerate(cells) if any(c.strip() for c in row)]
-    keep_c = [j for j in range(len(cells[0])) if any(row[j].strip() for row in cells)]
-    if len(keep_r) == len(cells) and len(keep_c) == len(cells[0]):
-        return cells, merges, header_rows
-    rmap = {old: new for new, old in enumerate(keep_r)}
-    cmap = {old: new for new, old in enumerate(keep_c)}
-    new_cells = [[cells[r][c] for c in keep_c] for r in keep_r]
-    new_merges: list[list[int]] = []
-    for r0, c0, rs, cs in merges:
-        rows = [rmap[r] for r in range(r0, r0 + rs) if r in rmap]
-        cols = [cmap[c] for c in range(c0, c0 + cs) if c in cmap]
-        if rows and cols and (len(rows) > 1 or len(cols) > 1):
-            new_merges.append([rows[0], cols[0], len(rows), len(cols)])
-    new_header = max(1, sum(1 for r in range(header_rows) if r in rmap))
-    return new_cells, new_merges, new_header
-
-
-def extract_scanned_table(page: pymupdf.Page, page_index: int, region: BBox) -> RawTable:
-    """Grid-from-pixels + line-removal + region OCR for one YOLO table
-    region on a scanned page.
-
-    Why not reuse the stage-5 full-page OCR words: Tesseract's layout
-    analysis treats tightly ruled regions as non-text and SILENTLY DROPS
-    the cell contents (found live — a full-page OCR of the sample's
-    scanned table returned only the heading above it). The standard fix
-    is line-removal preprocessing, and tier 2 is perfectly positioned for
-    it: the grid detection has already located every line, so erasing
-    them costs nothing — then a clean OCR pass reads the naked cell text,
-    and the words are re-anchored into cells using the grid geometry we
-    kept.
-
-    Returns cells=[] (source intact) when no grid is found — validation
-    downstream turns that into needs_review + crop, never a crash.
-    """
-    from .ocr import ensure_tessdata  # local import: avoid cycle at module load
-
-    clip = pymupdf.Rect(region)
-    pix = page.get_pixmap(clip=clip, dpi=RENDER_DPI)
-    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n).copy()
-    dark = arr.mean(axis=2) < GRID_DARK_THRESHOLD
-
-    # A pixel row/column is a grid line when enough of it is ink. Dense
-    # text rows peak around ~40% coverage; solid rules sit near the
-    # table-width/crop-width ratio, well above it. Merged cells only dent
-    # this: a boundary interrupted by a row-span still clears the bar as
-    # long as the span covers < ~half the table width (ledger #27 records
-    # the giant-merge case where it wouldn't).
-    h_centers = _line_centers(dark.mean(axis=1) > GRID_LINE_MIN_COVERAGE)
-    v_centers = _line_centers(dark.mean(axis=0) > GRID_LINE_MIN_COVERAGE)
-    if len(h_centers) < 2 or len(v_centers) < 2:
-        log.debug("p%04d: no pixel grid in region %s", page_index, region)
-        return RawTable(page=page_index, bbox=region, cells=[], source="grid_ocr")
-
-    rows, cols = len(h_centers) - 1, len(v_centers) - 1
-
-    # --- Per-segment border presence (ledger #27) -----------------------
-    # The uniform grid says where boundaries CAN be; merged cells are the
-    # boundaries that aren't there. Each candidate segment is checked for
-    # ink individually (trimmed a few px at the ends so crossing rules
-    # don't vote). Everything downstream — line erasure, word assignment,
-    # merge structure — keys off these presence maps.
-    def _h_border(line: int, col: int) -> bool:
-        lo, hi = max(0, int(h_centers[line]) - 2), int(h_centers[line]) + 3
-        x0, x1 = int(v_centers[col]) + 3, int(v_centers[col + 1]) - 2
-        if x1 <= x0:
-            return True
-        return bool(dark[lo:hi, x0:x1].any(axis=0).mean() > GRID_LINE_MIN_COVERAGE)
-
-    def _v_border(line: int, row: int) -> bool:
-        lo, hi = max(0, int(v_centers[line]) - 2), int(v_centers[line]) + 3
-        y0, y1 = int(h_centers[row]) + 3, int(h_centers[row + 1]) - 2
-        if y1 <= y0:
-            return True
-        return bool(dark[y0:y1, lo:hi].any(axis=1).mean() > GRID_LINE_MIN_COVERAGE)
-
-    # Union-find over grid cells: neighbors with no border between them
-    # are one logical (merged) cell.
-    parent = list(range(rows * cols))
-
-    def _find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def _union(a: int, b: int) -> None:
-        parent[_find(a)] = _find(b)
-
-    for r in range(rows):
-        for c in range(cols):
-            if r + 1 < rows and not _h_border(r + 1, c):
-                _union(r * cols + c, (r + 1) * cols + c)
-            if c + 1 < cols and not _v_border(c + 1, r):
-                _union(r * cols + c, r * cols + c + 1)
-
-    # Erase only borders that exist. Blanket erasure along a candidate
-    # line would cut through the middle of a merged cell — exactly where
-    # its vertically-centered label sits.
-    clean = arr.copy()
-    for line in range(len(h_centers)):
-        lo, hi = max(0, int(h_centers[line]) - 2), int(h_centers[line]) + 3
-        for c in range(cols):
-            if line in (0, rows) or _h_border(line, c):
-                clean[lo:hi, int(v_centers[c]) - 2 : int(v_centers[c + 1]) + 3] = 255
-    for line in range(len(v_centers)):
-        lo, hi = max(0, int(v_centers[line]) - 2), int(v_centers[line]) + 3
-        for r in range(rows):
-            if line in (0, cols) or _v_border(line, r):
-                clean[int(h_centers[r]) - 2 : int(h_centers[r + 1]) + 3, lo:hi] = 255
-
-    clean_pix = pymupdf.Pixmap(pymupdf.csRGB, pix.width, pix.height, clean.tobytes(), False)
-    ocr_doc = pymupdf.open(
-        "pdf", clean_pix.pdfocr_tobytes(language=OCR_LANGUAGES, tessdata=ensure_tessdata())
-    )
-
-    # The wrapper PDF's page is NOT guaranteed to be 1 px = 1 pt (pdfocr
-    # picks its own page scale) — same trap as stage 4, same medicine:
-    # derive the word->pixel scale from actual dimensions, never assume.
-    opage = ocr_doc.load_page(0)
-    wx = pix.width / opage.rect.width
-    wy = pix.height / opage.rect.height
-
-    # Words bucket into GRID cells first (with their position, so merged
-    # regions can be re-joined in reading order afterwards).
-    buckets: list[list[list[tuple[float, float, str]]]] = [
-        [[] for _ in range(cols)] for _ in range(rows)
-    ]
-    # get_text("words") returns (x0, y0, x1, y1, word, ...) tuples; the
-    # stubs type the mode union loosely, so narrow it explicitly.
-    words = cast(list[tuple[float, float, float, float, str]], opage.get_text("words"))
-    for x0, y0, x1, y1, word, *_ in words:
-        cx, cy = (x0 + x1) / 2 * wx, (y0 + y1) / 2 * wy
-        row = next((i for i in range(rows) if h_centers[i] <= cy < h_centers[i + 1]), None)
-        col = next((j for j in range(cols) if v_centers[j] <= cx < v_centers[j + 1]), None)
-        if row is not None and col is not None:
-            buckets[row][col].append((cy, cx, word))
-    ocr_doc.close()
-
-    # Each merged region's words join once (reading order) and the value
-    # lands in EVERY grid position the region covers — the same unmerged
-    # contract as tier 1, so stitching and chunking never see the
-    # difference between tiers.
-    regions: dict[int, list[tuple[float, float, str]]] = {}
-    members: dict[int, list[tuple[int, int]]] = {}
-    for r in range(rows):
-        for c in range(cols):
-            root = _find(r * cols + c)
-            regions.setdefault(root, []).extend(buckets[r][c])
-            members.setdefault(root, []).append((r, c))
-    cells = [["" for _ in range(cols)] for _ in range(rows)]
-    header_rows = 1
-    for r in range(rows):
-        for c in range(cols):
-            root = _find(r * cols + c)
-            cells[r][c] = " ".join(w for _, _, w in sorted(regions[root]))
-    merges: list[list[int]] = []
-    for _root, cells_of in sorted(members.items()):
-        if len(cells_of) < 2:
-            continue
-        r0 = min(r for r, _ in cells_of)
-        c0 = min(c for _, c in cells_of)
-        r1 = max(r for r, _ in cells_of)
-        c1 = max(c for _, c in cells_of)
-        merges.append([r0, c0, r1 - r0 + 1, c1 - c0 + 1])
-        if r0 == 0:
-            header_rows = max(header_rows, r1 + 1)
-
-    # Grid extent -> PDF points for the output bbox: same actual-dimensions
-    # rule as stage 4's pixel_rect_to_pdf, with the crop origin as offset.
-    sx = clip.width / pix.width
-    sy = clip.height / pix.height
-    bbox: BBox = (
-        clip.x0 + v_centers[0] * sx,
-        clip.y0 + h_centers[0] * sy,
-        clip.x0 + v_centers[-1] * sx,
-        clip.y0 + h_centers[-1] * sy,
-    )
-    cells, merges, header_rows = drop_empty_lines(cells, merges, header_rows)
-    return RawTable(
-        page=page_index,
-        bbox=bbox,
-        cells=cells,
-        source="grid_ocr",
-        header_rows=header_rows,
-        merges=merges,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -654,14 +430,6 @@ def finalize(
         table_id = f"t{first.page:04d}_{sum(1 for t in results if t.pages[0] == first.page):02d}"
         cells, merges = _merge_chain(chain)
         reason = validate_cells(cells)
-        if reason is None and first.source == "grid_ocr":
-            # OCR garbage gate (ledger #28): a structurally valid grid full
-            # of symbol soup (sideways scan, dirt) must not ship confident.
-            from .ocr import ocr_quality_score  # local import, matches ensure_tessdata
-
-            quality = ocr_quality_score(" ".join(c for row in cells for c in row))
-            if quality < OCR_MIN_QUALITY:
-                reason = f"OCR quality {quality:.2f} below {OCR_MIN_QUALITY} (garbage text?)"
         if reason is None and first.source == "find_tables":
             # Native cells can carry mojibake on pages whose text layer is
             # only mildly broken (below triage's reroute threshold,

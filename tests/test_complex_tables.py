@@ -3,12 +3,9 @@
 Every assertion is against EXPECTED output, declared next to the
 generator that draws the pages (complex_pdf.GT_*): the unmerged logical
 content — a merged value repeated into every grid position it covers.
-Tier 2 asserts the same exact matrices as tier 1: the corpus contract is
-clean machine-typeset print, where exact OCR is the expectation, not
-luck — if a tessdata upgrade fuzzes a letter, that is a real quality
-regression and the test SHOULD fail.
-
-Needs .tessdata/eng.traineddata — auto-downloaded on first use.
+The old tier-2 (pixel grid + Tesseract) tests are gone with their
+engine; scanned-page tables now come through the VLM lane, whose parser
+and verification are covered in test_vlm_extract.py.
 """
 
 import pymupdf
@@ -25,20 +22,12 @@ from rag_ingest.complex_pdf import (
 )
 from rag_ingest.layout import Region
 from rag_ingest.models import Source, Unit, UnitType
-from rag_ingest.ocr import ocr_quality_score
 from rag_ingest.tables import (
-    RawTable,
     TableResult,
     cells_to_grid,
     extract_native_tables,
-    extract_scanned_table,
     finalize,
 )
-from rag_ingest.triage import triage
-
-# Regions as YOLO would report them: table area plus padding.
-REGION_TWO_TIER = (60.0, 190.0, 505.0, 395.0)
-REGION_ROWSPAN = (60.0, 190.0, 475.0, 370.0)
 
 
 @pytest.fixture(scope="module")
@@ -46,12 +35,6 @@ def doc(tmp_path_factory):
     d = pymupdf.open(build_complex(tmp_path_factory.mktemp("pdf") / "complex_doc.pdf"))
     yield d
     d.close()
-
-
-@pytest.fixture(scope="module")
-def triaged(doc):
-    """Triage with orientation fixing — mutates doc page rotations."""
-    return triage(doc)
 
 
 # --- Tier 1: merged cells on native pages ------------------------------------
@@ -80,58 +63,6 @@ def test_tier1_combined_merges(doc):
     assert t.cells[3][0] == t.cells[3][1] == "Subtotal - earthworks"
     # The genuinely empty cell stays empty — fill must not invent content.
     assert t.cells[3][3] == ""
-
-
-# --- Tier 2: merged cells on scanned pages -----------------------------------
-
-
-def test_tier2_two_tier_header_from_pixels(doc):
-    t = extract_scanned_table(doc.load_page(3), 3, REGION_TWO_TIER)
-    assert t.cells == GT_TWO_TIER
-    assert t.header_rows == 2
-    assert [0, 0, 2, 1] in t.merges
-    assert [0, 2, 1, 2] in t.merges
-
-
-def test_tier2_rowspan_category_from_pixels(doc):
-    t = extract_scanned_table(doc.load_page(4), 4, REGION_ROWSPAN)
-    assert t.cells == GT_ROWSPAN
-    assert [1, 0, 3, 1] in t.merges and [4, 0, 2, 1] in t.merges
-
-
-# --- Orientation recovery (rotated scan) -------------------------------------
-
-
-def test_rotated_scan_detected_and_fixed(doc, triaged):
-    # Page 8 was authored with /Rotate 90; the fix must add 270 to render
-    # it upright again, after which tier 2 must read the SAME table the
-    # upright page 4 yields.
-    assert triaged[8].rotation_applied == 270
-    t = extract_scanned_table(doc.load_page(8), 8, REGION_ROWSPAN)
-    assert t.cells == GT_ROWSPAN
-
-
-# --- OCR quality gate --------------------------------------------------------
-
-
-def test_quality_scorer_separates_language_from_garbage():
-    good = "The supplier shall complete all services within 30 days at 5400.00 per unit."
-    garbage = "ol c & VU re) fe) o 8 fo) (c) 9 < dd ~-* (c) = &= rat # + @ -- 9 Oo O"
-    assert ocr_quality_score(good) > 0.9
-    assert ocr_quality_score(garbage) < 0.5
-    assert ocr_quality_score("") == 1.0  # no output is no evidence of garbage
-
-
-def test_garbage_grid_ocr_table_flagged_not_shipped(doc, tmp_path):
-    junk = RawTable(
-        page=0,
-        bbox=(72.0, 100.0, 500.0, 300.0),
-        cells=[["1 qi c. =! ra", "Q < = o an", "9 oO a"], ["m a 2 S a e", "Oo fay fox", "= g F"]],
-        source="grid_ocr",
-    )
-    results = finalize([junk], {0: 842.0}, doc, tmp_path)
-    assert results[0].needs_review
-    assert "quality" in (results[0].review_reason or "")
 
 
 # --- Stitching: row-span crossing the page break -----------------------------

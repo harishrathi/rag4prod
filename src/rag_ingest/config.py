@@ -50,9 +50,9 @@ DRAWING_MIN_SEGMENTS = 100
 # custom-encoded Indic fonts. Healthy text layers contain ZERO C0
 # control characters, so any occurrence is diagnostic. A page whose
 # extracted text crosses either bound below has a lying text layer and
-# is rerouted to the OCR path (the rendered glyphs are fine — Tesseract
-# reads what the text layer cannot say). Below both bounds the page
-# stays native and the few mojibake units are flagged needs_review.
+# is rerouted to the VLM lane (the rendered glyphs are fine — the page
+# is re-read from pixels). Below both bounds the page stays native and
+# the few mojibake units are flagged needs_review.
 # Measured on real documents: healthy pages 0 junk chars, broken pages
 # 20-451 per page.
 TEXT_LAYER_JUNK_MIN = 20  # absolute junk chars per page
@@ -212,74 +212,15 @@ VLM_LEN_HI = 3.0
 VLM_DENSE_INK_FRAC = 0.015
 VLM_MIN_CHARS_DENSE = 200
 
-# ---------------------------------------------------------------------------
-# STAGE 5 (LEGACY) — OCR (rag_ingest/ocr.py)
-# ---------------------------------------------------------------------------
-
-# PyMuPDF wheels BUNDLE libtesseract — no system install, no Docker. The
-# only external artifacts are the language data files, auto-downloaded
-# here. tessdata_fast trades a little accuracy for 4x smaller files and
-# faster inference; clean machine-typeset print (our corpus) barely
-# notices. Swap in the 'tessdata_best' URL if OCR quality disappoints.
-#
-# OCR_LANGUAGES is a Tesseract language string ('+'-separated). The
-# corpus is bilingual (Latin + Devanagari), and broken-CMap pages
-# (ledger #29) are OCR'd precisely BECAUSE their non-Latin text layer is
-# unusable — OCRing them in English only would re-lose the same text.
-TESSDATA_DIR = ".tessdata"
-TESSDATA_BASE_URL = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/{lang}.traineddata"
-OCR_LANGUAGES = "eng+hin"
-
-# OCR render resolution. 300 DPI is Tesseract's canonical sweet spot:
-# below ~250 accuracy drops off; above ~350 costs time for no gain.
-OCR_DPI = 300
-
-# OCR quality gate. ocr_quality_score() is the fraction of OCR tokens
-# that look like language (words with vowels, numbers) rather than
-# symbol soup. Calibrated on real pipeline output: clean Tesseract text
-# aggregates >= 0.9 per page, sideways/garbage OCR lands around 0.4-0.6.
-# Below this threshold a page's units (or a tier-2 table) are flagged
-# needs_review instead of entering the corpus as confident text —
-# ledger #16's "silent junk words" failure class, now caught at the
-# page level even without per-word confidences.
-OCR_MIN_QUALITY = 0.65
-
-# Orientation recovery (rotated/landscape scans). No single signal is
-# reliable — measured at probe DPI on real + synthetic pages:
-#   * quality scores barely move with rotation on number-heavy pages
-#     (a rotated drawing: 0.57-0.61 in ALL four orientations), because
-#     digits carry no chirality;
-#   * word counts alone also fail: sideways OCR hallucinates dozens of
-#     short vowel-bearing fragments, and on that same drawing the WRONG
-#     rotation read the most "words" (23 vs 12).
-# So the rule uses both. Early exit: a page reading >= EXIT_WORDS real
-# words at its current orientation is upright (real upright scans
-# measured 85-130; sideways/junk pages 8-28) — one cheap probe, no
-# search. A rotation is APPLIED only when its quality score clears
-# APPLY_SCORE with a gap >= APPLY_GAIN over the current orientation
-# (the one signal that separated a genuinely rotated text page: 0.95 vs
-# 0.64) AND it reads >= APPLY_WORDS real words (blocks digit-only
-# pages, where scores sit near 1.0 in every orientation). Pages failing
-# both ways are left alone; the OCR quality gate flags their units.
-# Known limit: a 180-degree flip of a dense text page can read enough
-# junk "words" to take the early exit — real OSD is the production
-# answer (ledger #28).
-ORIENTATION_DPI = 120
-ORIENTATION_EXIT_WORDS = 40
-ORIENTATION_APPLY_SCORE = 0.8
-ORIENTATION_APPLY_GAIN = 0.25
-ORIENTATION_APPLY_WORDS = 15
 
 # ---------------------------------------------------------------------------
 # STAGE 6 — Tables (rag_ingest/tables.py)
 # ---------------------------------------------------------------------------
 
-# Tier-2 grid detection on scanned tables: a pixel row/column counts as a
-# grid line when at least this fraction of its pixels are "ink" (darker
-# than GRID_DARK_THRESHOLD on a 0-255 gray scale). 0.5 tolerates broken /
-# skewed rules while rejecting rows of dense text, which rarely exceed
-# ~40% coverage in a single pixel row.
-GRID_LINE_MIN_COVERAGE = 0.5
+# "Ink" on a 0-255 gray scale: pixels darker than this. Originally the
+# tier-2 grid detector's knob; survives as the darkness bound behind
+# vlm_extract.ink_fraction() — the length-sanity proxy for true scans
+# (VLM spec §5.2).
 GRID_DARK_THRESHOLD = 128
 
 # Multi-page continuation: table on page N is a continuation CANDIDATE
@@ -291,7 +232,7 @@ TABLE_CONT_TOP_FRAC = 0.12
 
 # A continuation page often repeats the header row. Rows are compared
 # after whitespace normalization with a similarity ratio (not equality:
-# tier-2 cells carry OCR noise). Above this ratio -> treated as a
+# paid-lane cells can carry transcription noise). Above this ratio -> treated as a
 # repeated header and dropped from the continuation fragment.
 HEADER_MATCH_RATIO = 0.8
 

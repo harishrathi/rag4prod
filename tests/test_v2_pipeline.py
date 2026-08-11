@@ -1,9 +1,10 @@
 """v2 integration: profiling + routing against the synthetic sample's
 known ground truth, the Layer-0 gate, and an offline end-to-end run.
 
-Offline means no GEMINI_API_KEY: VLM-routed pages must degrade to
-flagged empty units (never crash, never vanish) while the free lane
-produces the same content v1's tests assert on."""
+The e2e fixture DISABLES the VLM engine explicitly (it must not depend
+on whether a real GEMINI_API_KEY happens to be configured): VLM-routed
+pages must degrade to flagged empty units (never crash, never vanish)
+while the free lane produces the same content v1's tests assert on."""
 
 import json
 
@@ -71,8 +72,18 @@ def test_encrypted_pdf_rejected_with_manifest(tmp_path):
 
 @pytest.fixture(scope="module")
 def e2e(sample_path, tmp_path_factory):
-    out = tmp_path_factory.mktemp("out2")
-    manifest = run(sample_path, out, cfg=IngestConfig(debug_images=False))
+    from rag_ingest.vlm_extract import GeminiClient, VlmError
+
+    def _engine_disabled(self, png, prompt):
+        raise VlmError("offline test: engine disabled")
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(GeminiClient, "generate", _engine_disabled)
+    try:
+        out = tmp_path_factory.mktemp("out2")
+        manifest = run(sample_path, out, cfg=IngestConfig(debug_images=False))
+    finally:
+        mp.undo()
     return manifest, out / "sample_doc"
 
 
