@@ -1,7 +1,11 @@
 """v2 orchestrator + CLI: the eight layers as StageSpecs.
 
+This is the DEFAULT pipeline since the cutover (the `rag-ingest` console
+script): validated by a chunk-identical diff against v1 on the full
+runnable corpus (scripts/diff_v1_v2.py).
+
 Usage:
-    python -m rag_ingest2.pipeline <pdf> [--out output2] [--from-stage N]
+    python -m rag_ingest2.pipeline <pdf> [--out output] [--from-stage N]
                                    [--workers N] [--no-debug] [--vlm-cache DIR]
 
 Layer 0 (ingest gate) runs before any stage exists: encrypted, corrupt,
@@ -9,7 +13,7 @@ and zero-page PDFs are rejected with a manifest reason, never a
 traceback. Stages 1-7 then run under the uniform orchestrator
 (stages.py); each writes its full artifact before the next reads it.
 
-Artifacts under output2/<doc_id>/stages/:
+Artifacts under output/<doc_id>/stages/:
     01_profiles.json    evidence per page (no decisions)
     02_routes.json      the decision log
     03_extract.json     units + regions + grids + vlm records + body size
@@ -376,7 +380,7 @@ def run(
 def main() -> None:
     parser = argparse.ArgumentParser(description="PDF ingestion pipeline v2 (rewrite)")
     parser.add_argument("pdf", type=Path, help="path to the PDF to ingest")
-    parser.add_argument("--out", type=Path, default=Path("output2"))
+    parser.add_argument("--out", type=Path, default=Path("output"))
     parser.add_argument(
         "--from-stage",
         type=int,

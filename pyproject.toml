@@ -26,8 +26,10 @@ dev = [
 ]
 
 [project.scripts]
-rag-ingest = "rag_ingest.pipeline:main"
-rag-ingest2 = "rag_ingest2.pipeline:main"
+# v2 is the pipeline since the cutover (chunk-identical diff vs v1 on the
+# full runnable corpus); v1 stays as the legacy reference under rag-ingest1.
+rag-ingest = "rag_ingest2.pipeline:main"
+rag-ingest1 = "rag_ingest.pipeline:main"
 
 # src layout: the package importable as `rag_ingest` lives in src/.
 # Standard practice for public packages — it guarantees tests run against

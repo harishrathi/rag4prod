@@ -15,25 +15,30 @@ Full architecture and the reasoning behind every design decision:
 [docs/design_spec.md](docs/design_spec.md); why Tesseract was replaced
 by one VLM code path for every script:
 [docs/gemini_extractor_spec.md](docs/gemini_extractor_spec.md).
-The clean-room v2 built from all 30 ledgered edge cases — the patches
-distilled back into an architecture — is implemented as `rag_ingest2`:
-[docs/rewrite_design.md](docs/rewrite_design.md).
 
-## Pipeline
+**The default pipeline is the v2 rewrite** (`rag_ingest2`) — the
+clean-room architecture built from all 30 ledgered edge cases, cut over
+after a chunk-level diff against v1 came back identical on every
+runnable document ([docs/rewrite_design.md](docs/rewrite_design.md),
+`scripts/diff_v1_v2.py`). The original `rag_ingest` remains in-tree as
+the legacy reference the design docs narrate.
+
+## Pipeline (v2, eight layers)
 
 ```text
-PDF ──1 triage──▶ page kinds ──2 local extract──▶ units (free, exact)
-        │
-        └─▶ 3 render ──▶ 4 layout (YOLO) ──▶ 5 VLM lane (paid) ──▶ units
-                              │                                      │
-                              └──▶ 6 tables (tiered ladder) ──▶ units│
-                                                                     │
-                    7 assemble + chunk ◀─────────────────────────────┘
-                        │
-                        └─▶ chunks.jsonl (retrieval-ready, cited by page + bbox)
+PDF ──0 ingest gate──▶ 1 profile (evidence) ──▶ 2 route (decisions)
+                                                     │
+        3 extraction workers ◀───────────────────────┘
+        (native = free · VLM = paid · drawing = stored figure)
+                 │ units + regions + grid evidence + VLM records
+                 ▼
+        4 table ladder ──▶ 5 normalize (doc-wide) ──▶ 6 quality gate
+                                                          │
+        7 chunk ◀─────────────────────────────────────────┘
+           └─▶ chunks.jsonl + merged.md + review_report.md
 ```
 
-Every stage checkpoints its output under `output/<doc_id>/stages/NN_*.json[l]`,
+Every layer checkpoints its output under `output/<doc_id>/stages/NN_*.json[l]`,
 so a document can be traced through the pipeline file by file, and any stage
 can be re-run from its predecessor's artifact (`--from-stage N`) without
 recomputing — or re-paying for — earlier stages.
@@ -52,6 +57,7 @@ recomputing — or re-paying for — earlier stages.
 | 8 | Real-corpus hardening: broken text layers → reroute, repeating header/footer suppression | ✅ |
 | 9 | Gemini VLM lane: one paid code path for every script, mojibake triage, response cache, verification gate | ✅ |
 | 10 | v2 rewrite (`rag_ingest2`): eight layers, typed coordinates, process-parallel workers, one quality gate | ✅ |
+| 11 | Cutover: v2 is the default `rag-ingest`; validated by chunk-identical diff vs v1 on the full runnable corpus | ✅ |
 
 ## Setup
 
@@ -71,15 +77,14 @@ python -m rag_ingest.complex_pdf
 
 # the paid lane needs a key (env var, or a gitignored .env at the repo
 # root with GEMINI_API_KEY=...); the free lane runs without one
-rag-ingest sample_data/sample_doc.pdf
+rag-ingest sample_data/sample_doc.pdf     # the v2 pipeline (default)
 rag-ingest sample_data/complex_doc.pdf
 
-# the v2 pipeline (same documents, eight-layer architecture; --vlm-cache
-# can point at a v1 cache so re-runs cost nothing)
-rag-ingest2 sample_data/sample_doc.pdf
+# the legacy v1 pipeline, kept as the reference the design docs narrate
+rag-ingest1 sample_data/sample_doc.pdf --out output1
 
-# inspect what happened, stage by stage
-cat output/sample_doc/stages/01_triage.json
+# inspect what happened, layer by layer
+cat output/sample_doc/stages/02_routes.json
 
 # run tests
 pytest

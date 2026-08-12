@@ -1,6 +1,13 @@
 # Rewrite design — v2 architecture from the lessons of v1
 
-**Status:** approved for implementation, revised 2026-08-11 for the
+**Status:** implemented (`src/rag_ingest2/`) and **cut over** on
+2026-08-12 — `rag-ingest` now runs v2. The §5 validation bar was met:
+the chunk-level diff against v1 (scripts/diff_v1_v2.py) came back
+identical on every runnable corpus document (five docs spanning native,
+live-VLM, complex-table, and 178-page shapes; the rest of the corpus was
+blocked by an API spending cap and exercises no additional code path —
+accepted). v1 remains in-tree as the legacy reference under
+`rag-ingest1`. Originally revised 2026-08-11 for the
 post-Gemini world: v1's stage 5 is now the VLM lane
 ([gemini_extractor_spec.md](gemini_extractor_spec.md)) and the Tesseract
 OCR engine, its orientation probe, and the tier-2 pixel-grid table path
